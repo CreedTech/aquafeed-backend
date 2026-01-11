@@ -4,13 +4,13 @@ Backend REST API for AquaFeed Pro, an intelligent fish feed formulation and farm
 
 ## Features
 
-- 🧮 **Linear Programming Feed Optimizer** - Uses `javascript-lp-solver` to find the cheapest feed formulation
-- 📊 **8-Parameter Nutritional Analysis** - Comprehensive nutrient tracking
-- 🎯 **Coppens Benchmarking** - Color-coded compliance (Red/Blue/Green)
-- 💰 **Wallet & Payment System** - Paystack integration
-- 👥 **Multi-Farm Management** - Support for multiple farms per user
-- 📱 **Offline-Ready** - Session-based architecture for mobile apps
-- 🔒 **Email OTP Authentication** - Passwordless login
+- **Linear Programming Feed Optimizer** - Uses `javascript-lp-solver` to find the cheapest feed formulation
+- **8-Parameter Nutritional Analysis** - Comprehensive nutrient tracking
+- **Coppens Benchmarking** - Color-coded compliance (Red/Blue/Green)
+- **Wallet & Payment System** - Paystack integration
+- **Multi-Farm Management** - Support for multiple farms per user
+- **Offline-Ready** - Session-based architecture for mobile apps
+- **Email OTP Authentication** - Passwordless login
 
 ## Tech Stack
 
@@ -48,19 +48,19 @@ nano .env
 
 ```env
 # MongoDB
-MONGODB_URI=mongodb://localhost:27017/aquafeed
+MONGODB_URI=
 
 # Redis
-REDIS_URL=redis://localhost:6379
+REDIS_URL=
 
 # Session
-SESSION_SECRET=your-secret-key
+SESSION_SECRET=
 
 # Email
-POSTMARK_API_KEY=your-key
+POSTMARK_API_KEY=
 
 # Paystack
-PAYSTACK_SECRET_KEY=sk_test_xxx
+PAYSTACK_SECRET_KEY=
 ```
 
 ## Database Setup
