@@ -6,7 +6,7 @@ Backend REST API for AquaFeed Pro, an intelligent fish feed formulation and farm
 
 - **Linear Programming Feed Optimizer** - Uses `javascript-lp-solver` to find the cheapest feed formulation
 - **8-Parameter Nutritional Analysis** - Comprehensive nutrient tracking
-- **Coppens Benchmarking** - Color-coded compliance (Red/Blue/Green)
+- **AquaFeed Pro Benchmarking** - Color-coded compliance (Red/Blue/Green)
 - **Wallet & Payment System** - Paystack integration
 - **Multi-Farm Management** - Support for multiple farms per user
 - **Offline-Ready** - Session-based architecture for mobile apps
@@ -125,7 +125,7 @@ backend/
 ## Key Models
 
 - **Ingredient** - 58 Nigerian feed ingredients with 8 nutritional parameters
-- **FeedStandard** - Benchmark standards (Coppens, Blue Crown)
+- **FeedStandard** - Benchmark standards (AquaFeed Pro)
 - **Formulation** - Feed calculation results (snapshot pattern)
 - **User** - Farmers, admins, consultants
 - **FarmProfile** - Multi-farm support with ponds

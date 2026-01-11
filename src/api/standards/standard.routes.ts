@@ -20,7 +20,7 @@ router.get('/', getStandards);
 
 /**
  * @route   GET /api/v1/standards/default
- * @desc    Get default standard (Coppens 3mm)
+ * @desc    Get default standard (AquaFeed Pro 3mm)
  * @access  Private
  */
 router.get('/default', getDefaultStandard);

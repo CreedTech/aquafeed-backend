@@ -18,7 +18,7 @@ export interface NutrientDeviation {
 
 /**
  * Compliance Checker Service
- * Compares formulation against Coppens or other benchmarks
+ * Compares formulation against AquaFeed Pro or other benchmarks
  * Returns color-coded compliance (Red/Blue/Green)
  */
 export class ComplianceService {
@@ -27,7 +27,7 @@ export class ComplianceService {
      * Check compliance against a feed standard
      * 
      * @param actualNutrients - Calculated nutrients from formulation
-     * @param targetNutrients - Benchmark standard (e.g., Coppens)
+     * @param targetNutrients - Benchmark standard (e.g., AquaFeed Pro)
      * @param tolerance - % deviation allowed (default 2%)
      * @returns ComplianceResult with color, quality match, and deviations
      */
