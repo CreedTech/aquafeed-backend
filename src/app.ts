@@ -41,6 +41,7 @@ app.use(
                     "'self'",
                     'https://cdn.jsdelivr.net',
                     'https://fonts.gstatic.com',
+                    'https:',
                     'data:'
                 ],
                 'img-src': ["'self'", 'data:', 'https:'],
