@@ -123,7 +123,7 @@ import adminRoutes from './api/admin/admin.routes';
 import paymentRoutes from './api/payment/payment.routes';
 import { clerkAuth } from './middleware/clerk.middleware';
 import { openApiSpec } from './config/swagger';
-import { apiReference } from '@scalar/express-api-reference';
+import scalarHtml from './config/scalarHtml';
 
 // ======================
 // Routes
@@ -134,14 +134,11 @@ app.get('/openapi.json', (_req: Request, res: Response) => {
     res.json(openApiSpec);
 });
 
-// API Documentation (Scalar)
-app.use(
-    '/api/docs',
-    apiReference({
-        theme: 'purple',
-        url: '/openapi.json',
-    })
-);
+// API Documentation (Scalar via CDN)
+app.get('/api/docs', (_req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.send(scalarHtml);
+});
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {
