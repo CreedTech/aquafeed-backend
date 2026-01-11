@@ -333,3 +333,63 @@ export const getAllFarmProfiles = async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 };
+
+/**
+ * Delete a formulation
+ */
+export const deleteFormulation = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const formulation = await Formulation.findByIdAndDelete(id);
+
+        if (!formulation) {
+            res.status(404).json({ error: 'Formulation not found' });
+            return;
+        }
+
+        res.json({ message: 'Formulation deleted successfully' });
+    } catch (error) {
+        console.error('Delete Formulation Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Delete a transaction
+ */
+export const deleteTransaction = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const transaction = await Transaction.findByIdAndDelete(id);
+
+        if (!transaction) {
+            res.status(404).json({ error: 'Transaction not found' });
+            return;
+        }
+
+        res.json({ message: 'Transaction deleted successfully' });
+    } catch (error) {
+        console.error('Delete Transaction Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Delete a farm profile
+ */
+export const deleteFarmProfile = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const farm = await FarmProfile.findByIdAndDelete(id);
+
+        if (!farm) {
+            res.status(404).json({ error: 'Farm profile not found' });
+            return;
+        }
+
+        res.json({ message: 'Farm profile deleted successfully' });
+    } catch (error) {
+        console.error('Delete Farm Profile Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};

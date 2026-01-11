@@ -27,13 +27,16 @@ router.post('/ingredients', ingredientController.createIngredient);
 router.put('/ingredients/:id', ingredientController.updateIngredient);
 router.delete('/ingredients/:id', ingredientController.deleteIngredient);
 
-// Formulations (Read-only for admin)
+// Formulations (Read-only for admin - but allowed to delete)
 router.get('/formulations', adminController.getAllFormulations);
+router.delete('/formulations/:id', adminController.deleteFormulation);
 
-// Transactions (Read-only for admin)
+// Transactions (Read-only for admin - but allowed to delete)
 router.get('/transactions', adminController.getAllTransactions);
+router.delete('/transactions/:id', adminController.deleteTransaction);
 
-// Farm Profiles (Read-only for admin)
+// Farm Profiles (Read-only for admin - but allowed to delete)
 router.get('/farms', adminController.getAllFarmProfiles);
+router.delete('/farms/:id', adminController.deleteFarmProfile);
 
 export default router;
