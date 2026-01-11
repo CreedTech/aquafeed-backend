@@ -31,6 +31,10 @@ Node.js, Express, TypeScript, MongoDB, javascript-lp-solver
         {
             url: 'http://localhost:5001',
             description: 'Development Server'
+        },
+        {
+            url: 'https://aquafeed-backend.vercel.app',
+            description: 'Production Server'
         }
     ],
     tags: [

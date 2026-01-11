@@ -11,6 +11,7 @@
     "seed": "ts-node src/scripts/seedIngredients.ts",
     "seed:standards": "ts-node src/scripts/seedFeedStandards.ts",
     "seed:all": "npm run seed && npm run seed:standards",
+    "create-admin": "ts-node src/scripts/createAdmin.ts",
     "lint": "eslint src/**/*.ts",
     "test": "jest"
   },
