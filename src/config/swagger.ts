@@ -9,15 +9,15 @@ export const openApiSpec = {
 **Linear Programming Based Cost Optimization for Nigerian Aquaculture**
 
 ## Features
-- 🧮 Linear Programming Solver (Simplex Algorithm)
-- 🐟 58 Nigerian Ingredients with Complete Nutritional Profiles
-- 📊 8-Parameter Nutritional Analysis
-- 🎯 Coppens Benchmarking (Red/Blue/Green Compliance)
-- 💰 Cost Optimization with Bag Rounding
-- 🔄 Alternative Ingredient Suggestions
-- 🏭 Batch & Inventory Management
-- 💳 Wallet & Payment System (Paystack)
-- 🛡️ Role-Based Access Control (Admin/User)
+-  Linear Programming Solver (Simplex Algorithm)
+-  58 Nigerian Ingredients with Complete Nutritional Profiles
+-  8-Parameter Nutritional Analysis
+-  Coppens Benchmarking (Red/Blue/Green Compliance)
+-  Cost Optimization with Bag Rounding
+-  Alternative Ingredient Suggestions
+-  Batch & Inventory Management
+-  Wallet & Payment System (Paystack)
+-  Role-Based Access Control (Admin/User)
 
 ## Technology Stack
 Node.js, Express, TypeScript, MongoDB, javascript-lp-solver

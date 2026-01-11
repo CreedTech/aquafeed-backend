@@ -123,8 +123,7 @@ import adminRoutes from './api/admin/admin.routes';
 import paymentRoutes from './api/payment/payment.routes';
 import { clerkAuth } from './middleware/clerk.middleware';
 import { openApiSpec } from './config/swagger';
-// Scalar import moved to dynamic import below (ESM-only package)
-import swaggerUi from 'swagger-ui-express';
+import { apiReference } from '@scalar/express-api-reference';
 
 // ======================
 // Routes
@@ -135,13 +134,12 @@ app.get('/openapi.json', (_req: Request, res: Response) => {
     res.json(openApiSpec);
 });
 
-// API Documentation (Swagger UI - works in production)
+// API Documentation (Scalar)
 app.use(
     '/api/docs',
-    swaggerUi.serve,
-    swaggerUi.setup(openApiSpec, {
-        customCss: '.swagger-ui .topbar { display: none }',
-        customSiteTitle: 'AquaFeed API Documentation',
+    apiReference({
+        theme: 'purple',
+        url: '/openapi.json',
     })
 );
 

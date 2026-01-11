@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "AquaFeed Pro - Backend API for Fish Feed Formulation ERP",
   "main": "dist/app.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
-    "dev": "nodemon --exec ts-node src/app.ts",
+    "dev": "nodemon --exec tsx src/app.ts",
     "build": "tsc",
     "start": "node dist/app.js",
     "seed": "ts-node src/scripts/seedIngredients.ts",
@@ -67,6 +67,7 @@
     "eslint": "^9.17.0",
     "nodemon": "^3.1.9",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.2"
   }
 }
