@@ -124,6 +124,7 @@ import paymentRoutes from './api/payment/payment.routes';
 import { clerkAuth } from './middleware/clerk.middleware';
 import { openApiSpec } from './config/swagger';
 // Scalar import moved to dynamic import below (ESM-only package)
+import swaggerUi from 'swagger-ui-express';
 
 // ======================
 // Routes
@@ -134,28 +135,15 @@ app.get('/openapi.json', (_req: Request, res: Response) => {
     res.json(openApiSpec);
 });
 
-// API Documentation (Scalar) - only in development
-// ESM-only package, use dynamic import to avoid Vercel CommonJS issues
-if (process.env.NODE_ENV !== 'production') {
-    import('@scalar/express-api-reference').then(({ apiReference }) => {
-        app.use(
-            '/api/docs',
-            apiReference({
-                theme: 'purple',
-                spec: {
-                    url: '/openapi.json',
-                },
-                defaultHttpClient: {
-                    targetKey: 'node',
-                    clientKey: 'fetch',
-                },
-            })
-        );
-        console.log('📚 API Docs available at /api/docs');
-    }).catch((err) => {
-        console.log('Scalar API docs not loaded:', err.message);
-    });
-}
+// API Documentation (Swagger UI - works in production)
+app.use(
+    '/api/docs',
+    swaggerUi.serve,
+    swaggerUi.setup(openApiSpec, {
+        customCss: '.swagger-ui .topbar { display: none }',
+        customSiteTitle: 'AquaFeed API Documentation',
+    })
+);
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {
