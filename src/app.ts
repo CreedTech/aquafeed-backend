@@ -73,6 +73,7 @@ const corsOptions = {
         process.env.FRONTEND_URL || 'http://localhost:3000',
         process.env.ADMIN_URL || 'http://localhost:3001',
         'http://localhost:3000', // Admin panel (Next.js default)
+        'https://aquafeed-admin.vercel.app', // Production admin panel
     ],
     credentials: true,
     optionsSuccessStatus: 200
