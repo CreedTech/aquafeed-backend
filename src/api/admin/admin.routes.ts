@@ -12,6 +12,7 @@ router.use(requireAdmin);
 // User Management
 router.get('/users', adminController.getAllUsers);
 router.patch('/users/:id/block', adminController.toggleUserBlock);
+router.post('/users/bulk-block', adminController.bulkBlockUsers);
 router.patch('/users/:id', adminController.updateUser);
 router.get('/stats', adminController.getSystemStats);
 router.get('/chart-data', adminController.getChartData);
@@ -30,13 +31,16 @@ router.delete('/ingredients/:id', ingredientController.deleteIngredient);
 // Formulations (Read-only for admin - but allowed to delete)
 router.get('/formulations', adminController.getAllFormulations);
 router.delete('/formulations/:id', adminController.deleteFormulation);
+router.post('/formulations/bulk-delete', adminController.bulkDeleteFormulations);
 
 // Transactions (Read-only for admin - but allowed to delete)
 router.get('/transactions', adminController.getAllTransactions);
 router.delete('/transactions/:id', adminController.deleteTransaction);
+router.post('/transactions/bulk-delete', adminController.bulkDeleteTransactions);
 
 // Farm Profiles (Read-only for admin - but allowed to delete)
 router.get('/farms', adminController.getAllFarmProfiles);
 router.delete('/farms/:id', adminController.deleteFarmProfile);
+router.post('/farms/bulk-delete', adminController.bulkDeleteFarms);
 
 export default router;

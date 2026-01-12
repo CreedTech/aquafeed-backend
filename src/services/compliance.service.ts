@@ -129,7 +129,7 @@ export class ComplianceService {
         } else if (targetRange.max !== undefined) {
             // Maximum only (e.g., fiber <= 3.5%)
             targetValue = targetRange.max;
-            minAcceptable = targetRange.max * (1 - tolerance / 100);
+            minAcceptable = 0; // For max-only (like fiber), being lower is fine, not a failure
             maxAcceptable = targetRange.max * (1 + tolerance / 100);
         } else {
             // Fallback

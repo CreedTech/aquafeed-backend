@@ -237,10 +237,23 @@ export const getAllFormulations = async (req: Request, res: Response) => {
         const skip = (page - 1) * limit;
         const userId = req.query.userId as string;
         const search = req.query.search as string;
+        const compliance = req.query.compliance as string;
+        const status = req.query.status as string;
 
         const query: any = {};
         if (userId) query.userId = userId;
         if (search) query.batchName = { $regex: search, $options: 'i' };
+        if (compliance) query.complianceColor = compliance;
+
+        // Status filtering logic
+        if (status === 'unlocked') {
+            query.isUnlocked = true;
+        } else if (status === 'demo') {
+            query.isDemo = true;
+        } else if (status === 'locked') {
+            query.isUnlocked = false;
+            query.isDemo = false;
+        }
 
         const formulations = await Formulation.find(query)
             .populate('userId', 'name email')
@@ -315,14 +328,26 @@ export const getAllFarmProfiles = async (req: Request, res: Response) => {
         const page = parseInt(req.query.page as string) || 1;
         const limit = parseInt(req.query.limit as string) || 10;
         const skip = (page - 1) * limit;
+        const search = req.query.search as string;
 
-        const farms = await FarmProfile.find()
+        const query: any = {};
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { 'location.state': { $regex: search, $options: 'i' } },
+                { 'location.lga': { $regex: search, $options: 'i' } },
+                // Simple location string fallback
+                { location: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const farms = await FarmProfile.find(query)
             .populate('userId', 'name email')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit);
 
-        const total = await FarmProfile.countDocuments();
+        const total = await FarmProfile.countDocuments(query);
 
         res.json({
             data: farms,
@@ -390,6 +415,100 @@ export const deleteFarmProfile = async (req: Request, res: Response) => {
         res.json({ message: 'Farm profile deleted successfully' });
     } catch (error) {
         console.error('Delete Farm Profile Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Bulk Block/Unblock Users
+ */
+export const bulkBlockUsers = async (req: Request, res: Response) => {
+    try {
+        const { ids, isActive } = req.body; // ids: string[], isActive: boolean
+
+        if (!Array.isArray(ids) || ids.length === 0) {
+            res.status(400).json({ error: 'No user IDs provided' });
+            return;
+        }
+
+        // Update users
+        await User.updateMany(
+            { _id: { $in: ids } },
+            { isActive }
+        );
+
+        // Update connected farms
+        await FarmProfile.updateMany(
+            { userId: { $in: ids } },
+            { isActive }
+        );
+
+        res.json({ message: `Successfully ${isActive ? 'unblocked' : 'blocked'} ${ids.length} users` });
+    } catch (error) {
+        console.error('Bulk Block Users Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Bulk Delete Formulations
+ */
+export const bulkDeleteFormulations = async (req: Request, res: Response) => {
+    try {
+        const { ids } = req.body;
+
+        if (!Array.isArray(ids) || ids.length === 0) {
+            res.status(400).json({ error: 'No formulation IDs provided' });
+            return;
+        }
+
+        await Formulation.deleteMany({ _id: { $in: ids } });
+
+        res.json({ message: `Successfully deleted ${ids.length} formulations` });
+    } catch (error) {
+        console.error('Bulk Delete Formulations Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Bulk Delete Transactions
+ */
+export const bulkDeleteTransactions = async (req: Request, res: Response) => {
+    try {
+        const { ids } = req.body;
+
+        if (!Array.isArray(ids) || ids.length === 0) {
+            res.status(400).json({ error: 'No transaction IDs provided' });
+            return;
+        }
+
+        await Transaction.deleteMany({ _id: { $in: ids } });
+
+        res.json({ message: `Successfully deleted ${ids.length} transactions` });
+    } catch (error) {
+        console.error('Bulk Delete Transactions Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Bulk Delete Farms
+ */
+export const bulkDeleteFarms = async (req: Request, res: Response) => {
+    try {
+        const { ids } = req.body;
+
+        if (!Array.isArray(ids) || ids.length === 0) {
+            res.status(400).json({ error: 'No farm IDs provided' });
+            return;
+        }
+
+        await FarmProfile.deleteMany({ _id: { $in: ids } });
+
+        res.json({ message: `Successfully deleted ${ids.length} farms` });
+    } catch (error) {
+        console.error('Bulk Delete Farms Error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 };
