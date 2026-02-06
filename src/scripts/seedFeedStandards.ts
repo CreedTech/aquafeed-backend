@@ -8,8 +8,8 @@ dotenv.config();
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/aquafeed';
 
 /**
- * Seed Coppens and other feed standards
- * Based on industry benchmarks for Nigerian aquaculture
+ * Seed AquaFeed Pro standards for Nigerian aquaculture
+ * Stages: Fry, Fingerling, Grower, Finisher
  */
 async function seedFeedStandards() {
     try {
@@ -24,13 +24,34 @@ async function seedFeedStandards() {
 
         // 2026 Nigerian Fish Feed Standards (AquaFeed Pro)
         const standards = [
-            // Starter (Fry) - 0.3mm to 2mm pellet
+            // Fry - 0.3mm to 0.8mm pellet (newly hatched)
             {
-                name: 'Premium Starter 1.5mm',
+                name: 'Fry Premium 0.5mm',
+                brand: 'AquaFeed Pro',
+                pelletSize: '0.5mm',
+                fishType: 'Catfish',
+                stage: 'Fry',
+                targetNutrients: {
+                    protein: { min: 48, max: 55 },
+                    fat: { min: 14, max: 18 },
+                    fiber: { max: 3 },
+                    ash: { max: 10 },
+                    lysine: { min: 2.8 },
+                    methionine: { min: 1.2 },
+                    calcium: { min: 1.2, max: 2.2 },
+                    phosphorous: { min: 1.0, max: 1.8 }
+                },
+                tolerance: 2,
+                isDefault: false,
+                isActive: true
+            },
+            // Fingerling - 1mm to 2mm pellet
+            {
+                name: 'Fingerling Premium 1.5mm',
                 brand: 'AquaFeed Pro',
                 pelletSize: '1.5mm',
                 fishType: 'Catfish',
-                stage: 'Starter',
+                stage: 'Fingerling',
                 targetNutrients: {
                     protein: { min: 45, max: 50 },
                     fat: { min: 12, max: 16 },
@@ -127,7 +148,47 @@ async function seedFeedStandards() {
                 isDefault: false,
                 isActive: true
             },
-            // Tilapia specific
+            // Tilapia specific - All stages
+            {
+                name: 'Tilapia Fry 0.5mm',
+                brand: 'AquaFeed Pro',
+                pelletSize: '0.5mm',
+                fishType: 'Tilapia',
+                stage: 'Fry',
+                targetNutrients: {
+                    protein: { min: 40, max: 45 },
+                    fat: { min: 8, max: 12 },
+                    fiber: { max: 4 },
+                    ash: { max: 12 },
+                    lysine: { min: 2.2 },
+                    methionine: { min: 0.8 },
+                    calcium: { min: 1.0, max: 1.8 },
+                    phosphorous: { min: 0.8, max: 1.4 }
+                },
+                tolerance: 2,
+                isDefault: false,
+                isActive: true
+            },
+            {
+                name: 'Tilapia Fingerling 1.5mm',
+                brand: 'AquaFeed Pro',
+                pelletSize: '1.5mm',
+                fishType: 'Tilapia',
+                stage: 'Fingerling',
+                targetNutrients: {
+                    protein: { min: 36, max: 42 },
+                    fat: { min: 7, max: 11 },
+                    fiber: { max: 5 },
+                    ash: { max: 12 },
+                    lysine: { min: 2.0 },
+                    methionine: { min: 0.7 },
+                    calcium: { min: 0.9, max: 1.6 },
+                    phosphorous: { min: 0.7, max: 1.3 }
+                },
+                tolerance: 2,
+                isDefault: false,
+                isActive: true
+            },
             {
                 name: 'Tilapia Grower 3mm',
                 brand: 'AquaFeed Pro',
@@ -143,6 +204,26 @@ async function seedFeedStandards() {
                     methionine: { min: 0.6 },
                     calcium: { min: 0.8, max: 1.5 },
                     phosphorous: { min: 0.6, max: 1.2 }
+                },
+                tolerance: 2,
+                isDefault: false,
+                isActive: true
+            },
+            {
+                name: 'Tilapia Finisher 4mm',
+                brand: 'AquaFeed Pro',
+                pelletSize: '4mm',
+                fishType: 'Tilapia',
+                stage: 'Finisher',
+                targetNutrients: {
+                    protein: { min: 28, max: 34 },
+                    fat: { min: 5, max: 9 },
+                    fiber: { max: 8 },
+                    ash: { max: 12 },
+                    lysine: { min: 1.4 },
+                    methionine: { min: 0.5 },
+                    calcium: { min: 0.7, max: 1.4 },
+                    phosphorous: { min: 0.5, max: 1.1 }
                 },
                 tolerance: 2,
                 isDefault: false,

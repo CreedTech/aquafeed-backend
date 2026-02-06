@@ -16,7 +16,7 @@ export interface IFarmProfile extends Document {
         lga: string;
         address?: string;
     };
-    fishType: 'Catfish' | 'Tilapia' | 'Both';
+    fishType: string;  // Dynamic from Categories
     ponds: IPond[];
     isActive: boolean;
     isDefault: boolean;
@@ -55,7 +55,6 @@ const FarmProfileSchema = new Schema<IFarmProfile>({
     },
     fishType: {
         type: String,
-        enum: ['Catfish', 'Tilapia', 'Both'],
         required: true
     },
     ponds: {

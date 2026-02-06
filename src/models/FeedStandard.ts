@@ -1,8 +1,8 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface INutrientRange {
-    min?: number;
-    max?: number;
+    min: number;
+    max: number;
 }
 
 export interface ITargetNutrients {
@@ -20,8 +20,8 @@ export interface IFeedStandard extends Document {
     name: string;
     brand: string;
     pelletSize: string;  // 2mm, 3mm, 4.5mm, etc.
-    fishType: 'Catfish' | 'Tilapia' | 'Both';
-    stage: 'Starter' | 'Grower' | 'Finisher';
+    fishType: string;  // Dynamic from Categories
+    stage: string;       // Dynamic from Categories
     targetNutrients: ITargetNutrients;
     tolerance: number;  // % deviation allowed (default 6%)
     isDefault: boolean;
@@ -64,13 +64,11 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
     },
     fishType: {
         type: String,
-        enum: ['Catfish', 'Tilapia', 'Both'],
         required: true,
         index: true
     },
     stage: {
         type: String,
-        enum: ['Starter', 'Grower', 'Finisher'],
         required: true,
         index: true
     },
@@ -80,13 +78,12 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
     },
     tolerance: {
         type: Number,
-        default: 2,   // ±2% tolerance (professor's recommendation)
-        min: 0,
-        max: 20
+        default: 6
     },
     isDefault: {
         type: Boolean,
-        default: false
+        default: false,
+        index: true
     },
     isActive: {
         type: Boolean,
@@ -97,7 +94,7 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
     timestamps: true
 });
 
-// Index for query performance
-FeedStandardSchema.index({ brand: 1, fishType: 1, stage: 1 });
+// Update index prefix for fishType/stage
+FeedStandardSchema.index({ fishType: 1, stage: 1, isActive: 1 });
 
 export default mongoose.model<IFeedStandard>('FeedStandard', FeedStandardSchema);

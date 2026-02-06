@@ -9,13 +9,34 @@ dotenv.config();
 
 // 2026 Nigerian Fish Feed Standards (updated from industry sources)
 const STANDARDS_2026 = [
-    // Starter (Fry) - 0.3mm to 2mm pellet
+    // Fry - 0.3mm to 0.8mm pellet (newly hatched)
     {
-        name: 'Premium Starter 1.5mm',
+        name: 'Fry Premium 0.5mm',
+        brand: 'AquaFeed Pro',
+        pelletSize: '0.5mm',
+        fishType: 'Catfish',
+        stage: 'Fry',
+        targetNutrients: {
+            protein: { min: 48, max: 55 },
+            fat: { min: 14, max: 18 },
+            fiber: { max: 3 },
+            ash: { max: 10 },
+            lysine: { min: 2.8 },
+            methionine: { min: 1.2 },
+            calcium: { min: 1.2, max: 2.2 },
+            phosphorous: { min: 1.0, max: 1.8 }
+        },
+        tolerance: 8,
+        isDefault: false,
+        isActive: true
+    },
+    // Fingerling - 1mm to 2mm pellet
+    {
+        name: 'Fingerling Premium 1.5mm',
         brand: 'AquaFeed Pro',
         pelletSize: '1.5mm',
         fishType: 'Catfish',
-        stage: 'Starter',
+        stage: 'Fingerling',
         targetNutrients: {
             protein: { min: 45, max: 50 },
             fat: { min: 12, max: 16 },
