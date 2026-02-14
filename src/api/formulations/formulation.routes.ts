@@ -2,6 +2,10 @@ import { Router } from 'express';
 import { requireAuth } from '../../middleware/auth.middleware';
 import {
     calculateFormulation,
+    previewFormulationFix,
+    evaluateAlternativeOptions,
+    getAlternativeCacheResult,
+    getFormulationPricing,
     unlockFormulation,
     getFormulations
 } from './formulation.controller';
@@ -17,6 +21,16 @@ router.use(requireAuth);
  * @access  Private
  */
 router.post('/calculate', calculateFormulation);
+
+/**
+ * @route   POST /api/v1/formulations/preview-fix
+ * @desc    Preview one-tap remediations for infeasible formulations
+ * @access  Private
+ */
+router.post('/preview-fix', previewFormulationFix);
+router.post('/alternatives/evaluate', evaluateAlternativeOptions);
+router.get('/alternatives/cache/:cacheKey', getAlternativeCacheResult);
+router.get('/unlock-fee', getFormulationPricing);
 
 /**
  * @route   POST /api/v1/formulations/:id/unlock

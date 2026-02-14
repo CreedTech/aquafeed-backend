@@ -30,7 +30,7 @@ class ConfigurationService {
      * Get all configurations as a flat object for solver/snapshots
      */
     async getAll(): Promise<Record<string, any>> {
-        const configs = await Configuration.find({ isActive: true });
+        const configs = await Configuration.find({});
         const result: Record<string, any> = {};
         configs.forEach(c => {
             result[c.key] = c.value;
