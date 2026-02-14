@@ -123,6 +123,7 @@ import inventoryRoutes from './api/inventory/inventory.routes';
 import batchRoutes from './api/batches/batch.routes';
 import adminRoutes from './api/admin/admin.routes';
 import paymentRoutes from './api/payment/payment.routes';
+import templateRoutes from './api/formulations/template.routes';
 import { clerkAuth } from './middleware/clerk.middleware';
 import { openApiSpec } from './config/swagger';
 import scalarHtml from './config/scalarHtml';
@@ -178,6 +179,7 @@ app.use('/api/v1/inventory', inventoryRoutes);
 app.use('/api/v1/batches', batchRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/payments', paymentRoutes);
+app.use('/api/v1/templates', templateRoutes);
 
 // ======================
 // Error Handling
