@@ -12,18 +12,27 @@ async function seedCategories() {
         await mongoose.connect(MONGODB_URI);
         console.log('Connected successfully!\n');
 
-        // Default fish types
+        // Default species types
         const fishTypes = [
             { name: 'CATFISH', displayName: 'Catfish', type: 'fish_type' as const, sortOrder: 1 },
             { name: 'TILAPIA', displayName: 'Tilapia', type: 'fish_type' as const, sortOrder: 2 },
+            { name: 'POULTRY', displayName: 'Poultry', type: 'fish_type' as const, sortOrder: 3 },
         ];
 
         // Default stages
         const stages = [
-            { name: 'FRY', displayName: 'Fry', type: 'stage' as const, sortOrder: 1, description: 'Very young fish, 0-4 weeks' },
-            { name: 'FINGERLING', displayName: 'Fingerling', type: 'stage' as const, sortOrder: 2, description: 'Juvenile fish, 1-3 months' },
-            { name: 'GROWER', displayName: 'Grower', type: 'stage' as const, sortOrder: 3, description: 'Growing fish, 3-6 months' },
-            { name: 'FINISHER', displayName: 'Finisher', type: 'stage' as const, sortOrder: 4, description: 'Mature fish ready for harvest' },
+            { name: 'FRY', displayName: 'Fry', type: 'stage' as const, sortOrder: 1, description: 'Very young fish' },
+            { name: 'FINGERLING', displayName: 'Fingerling', type: 'stage' as const, sortOrder: 2, description: 'Juvenile fish' },
+            { name: 'GROWER', displayName: 'Grower', type: 'stage' as const, sortOrder: 3, description: 'Growing phase' },
+            { name: 'FINISHER', displayName: 'Finisher', type: 'stage' as const, sortOrder: 4, description: 'Harvest ready' },
+            { name: 'STARTER', displayName: 'Starter', type: 'stage' as const, sortOrder: 5, description: 'Poultry early stage' },
+            { name: 'LAYER_PROD', displayName: 'Layer Production', type: 'stage' as const, sortOrder: 6, description: 'Poultry egg production' },
+        ];
+
+        // Default Poultry Types
+        const otherCategories = [
+            { name: 'BROILER', displayName: 'Broiler', type: 'other' as const, sortOrder: 1 },
+            { name: 'LAYER', displayName: 'Layer', type: 'other' as const, sortOrder: 2 },
         ];
 
         console.log('Seeding fish types...');
@@ -44,6 +53,16 @@ async function seedCategories() {
                 { upsert: true, new: true }
             );
             console.log(`  ✓ ${stage.displayName}`);
+        }
+
+        console.log('\nSeeding Poultry Types...');
+        for (const cat of otherCategories) {
+            await Category.findOneAndUpdate(
+                { name: cat.name, type: cat.type },
+                { $set: cat },
+                { upsert: true, new: true }
+            );
+            console.log(`  ✓ ${cat.displayName}`);
         }
 
         console.log('\n============================================================');

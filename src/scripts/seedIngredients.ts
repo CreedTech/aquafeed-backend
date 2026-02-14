@@ -14,6 +14,7 @@ interface IngredientData {
     category: string;
     defaultPrice: number | null;
     nutrients: {
+        energy: number;
         protein: number;
         fat: number;
         fiber: number;
