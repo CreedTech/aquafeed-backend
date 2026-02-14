@@ -24,6 +24,7 @@ router.put('/categories/:id', categoryController.updateCategory);
 router.delete('/categories/:id', categoryController.deleteCategory);
 
 // Master Ingredient Management
+router.get('/ingredients', ingredientController.getAllIngredients);
 router.post('/ingredients', ingredientController.createIngredient);
 router.put('/ingredients/:id', ingredientController.updateIngredient);
 router.delete('/ingredients/:id', ingredientController.deleteIngredient);
@@ -42,5 +43,15 @@ router.post('/transactions/bulk-delete', adminController.bulkDeleteTransactions)
 router.get('/farms', adminController.getAllFarmProfiles);
 router.delete('/farms/:id', adminController.deleteFarmProfile);
 router.post('/farms/bulk-delete', adminController.bulkDeleteFarms);
+
+// System Configuration
+router.get('/configurations', adminController.getConfigurations);
+router.put('/configurations/:key', adminController.updateConfiguration);
+
+// Quick Mix Templates
+router.get('/templates', adminController.getAllTemplatesAdmin);
+router.post('/templates', adminController.createTemplateAdmin);
+router.put('/templates/:id', adminController.updateTemplateAdmin);
+router.delete('/templates/:id', adminController.deleteTemplateAdmin);
 
 export default router;

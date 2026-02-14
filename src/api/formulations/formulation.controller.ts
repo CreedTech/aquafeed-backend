@@ -5,6 +5,7 @@ import Formulation from '../../models/Formulation';
 import User from '../../models/User';
 import solverService, { FormulationStrategy } from '../../services/solver.service';
 import complianceService from '../../services/compliance.service';
+import { configService } from '../../services/config.service';
 
 /**
  * Calculate Feed Formulation (The "Joggler")
@@ -33,21 +34,12 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             });
         }
 
-        // Demo Mode Logic: Force 2kg for free/authenticated users who haven't paid for full access
+        // All formulations are production-ready now. No demo capping.
         let effectiveWeightKg = Number(targetWeightKg);
-        let isDemo = false;
+        const isDemo = false; // Demo mode retired as per user request
 
-        // Check user access (authenticated)
+        // Restore auth context
         const userId = (req as any).session?.userId;
-        const user = await User.findById(userId);
-
-        // If not admin and not paid for full access, force demo mode
-        if (user && user.role !== 'admin' && !user.hasFullAccess) {
-            if (effectiveWeightKg > 5) {
-                effectiveWeightKg = 5;
-                isDemo = true;
-            }
-        }
 
         // Get the feed standard
         const standard = await FeedStandard.findById(standardId);
@@ -122,13 +114,15 @@ export const calculateFormulation = async (req: Request, res: Response) => {
 
         console.log('Plain targetNutrients:', JSON.stringify(targetNutrients, null, 2));
 
-        const options = strategies.map(strategy => {
-            const solverResult = solverService.optimizeFormulation({
+        const options = await Promise.all(strategies.map(async strategy => {
+            const solverResult = await solverService.optimizeFormulation({
                 targetWeightKg: effectiveWeightKg,
                 ingredients: ingredientsForSolver,
                 nutritionalTarget: targetNutrients,
                 tolerance: standard.tolerance,
-                strategy
+                strategy,
+                feedCategory: standard.feedCategory as any,
+                poultryType: standard.poultryType as any
             });
 
             if (!solverResult.feasible) return { strategy, feasible: false, message: solverResult.message };
@@ -167,13 +161,6 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             // Add overhead costs (milling, processing, transport)
             totalCostWithBags += Number(overheadCost);
 
-            // Check compliance against standard
-            const complianceResult = complianceService.checkCompliance(
-                solverResult.actualNutrients,
-                standard.targetNutrients,
-                standard.tolerance
-            );
-
             // [IP PROTECTION] We return the recipe here for the ephemeral preview, 
             // but we won't persist it to the DB in this call.
             const recipeSnapshot = Object.keys(solverResult.ingredientQuantities).map(ingId => {
@@ -187,6 +174,23 @@ export const calculateFormulation = async (req: Request, res: Response) => {
                 };
             });
 
+            // Check compliance against standard
+            const complianceResult = complianceService.checkCompliance(
+                solverResult.actualNutrients,
+                standard.targetNutrients,
+                standard.tolerance,
+                recipeSnapshot.map(r => ({
+                    name: r.name,
+                    qtyKg: r.qtyKg,
+                    tags: ingredients.find(i => i.name === r.name)?.tags
+                })),
+                effectiveWeightKg,
+                {
+                    feedCategory: standard.feedCategory,
+                    poultryType: standard.poultryType
+                }
+            );
+
             return {
                 strategy,
                 feasible: true,
@@ -199,7 +203,7 @@ export const calculateFormulation = async (req: Request, res: Response) => {
                 recipe: [...recipeSnapshot, ...autoCalcRecipe], // Include auto-calculated ingredients
                 overheadCost: Number(overheadCost) // Return for transparency
             };
-        });
+        }));
 
         // Filter out infeasible options
         const feasibleOptions = options.filter(o => o.feasible);
@@ -235,6 +239,7 @@ export const calculateFormulation = async (req: Request, res: Response) => {
                 ingredientId: ingredients.find(i => i.name === r.name)?._id,
                 nutrientsAtMoment: ingredients.find(i => i.name === r.name)?.nutrients
             })),
+            configSnapshot: await configService.getAll(),
             isUnlocked: false
         });
         await summary.save();
@@ -246,29 +251,14 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             $set: { freeTrialUsed: true }
         });
 
-        const responseOptions = isDemo
-            ? feasibleOptions.map((o: any) => ({
-                ...o,
-                totalCost: 0,
-                costPerKg: 0,
-                actualNutrients: {},
-                recipe: o.recipe.map((r: any) => ({
-                    ...r,
-                    qtyKg: 0,
-                    bags: 0,
-                    priceAtMoment: 0
-                }))
-            }))
-            : feasibleOptions;
+        const responseOptions = feasibleOptions;
 
         res.json({
             formulationId,
             options: responseOptions,
             isDemo,
             effectiveWeightKg,
-            message: isDemo
-                ? 'Demo Mode: Results capped at 5kg. Unlock for full production weights.'
-                : 'Multi-strategy formulations calculated. Compare and unlock your preferred mix.'
+            message: 'Multi-strategy formulations calculated. Compare and unlock your preferred mix.'
         });
 
     } catch (error) {
@@ -308,18 +298,18 @@ export const unlockFormulation = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const UNLOCK_FEE = 10000;
-        if (user.walletBalance < UNLOCK_FEE) {
+        const unlockFee = await configService.get<number>('formulation_fee', 10000);
+        if (user.walletBalance < unlockFee) {
             return res.status(403).json({
                 error: 'Insufficient balance',
-                message: `You need ₦${UNLOCK_FEE.toLocaleString()} to unlock this formulation. Your current balance is ₦${user.walletBalance.toLocaleString()}.`,
+                message: `You need ₦${unlockFee.toLocaleString()} to unlock this formulation. Your current balance is ₦${user.walletBalance.toLocaleString()}.`,
                 requiresDeposit: true,
-                requiredAmount: UNLOCK_FEE - user.walletBalance
+                requiredAmount: unlockFee - user.walletBalance
             });
         }
 
         // Deduct balance
-        user.walletBalance -= UNLOCK_FEE;
+        user.walletBalance -= unlockFee;
         await user.save();
 
         // Unlock formulation

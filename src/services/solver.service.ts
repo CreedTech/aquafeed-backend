@@ -1,8 +1,9 @@
 // @ts-ignore - javascript-lp-solver doesn't have TypeScript types
 import solver from 'javascript-lp-solver';
-import { INutrients } from '../models/Ingredient';
+import { INutrients, IIngredient } from '../models/Ingredient';
+import { configService } from './config.service';
 
-export interface IngredientForSolver {
+export interface IngredientForSolver extends Partial<IIngredient> {
     id: string;
     name: string;
     price: number;  // ₦/kg
@@ -12,11 +13,14 @@ export interface IngredientForSolver {
         min_inclusion?: number;  // % min
     };
     bagWeight?: number | null;
+    tags?: string[];
 }
 
 export interface NutritionalTarget {
     protein: { min?: number; max?: number };
     fat: { min?: number; max?: number };
+    carbohydrate?: { min?: number; max?: number };
+    energy?: { min?: number; max?: number };
     fiber: { min?: number; max?: number };
     ash?: { min?: number; max?: number };
     lysine?: { min?: number; max?: number };
@@ -37,6 +41,8 @@ export interface SolverInput {
     nutritionalTarget: NutritionalTarget;
     tolerance?: number;  // % deviation allowed (default 2%)
     strategy?: FormulationStrategy;
+    feedCategory?: 'Catfish' | 'Poultry';
+    poultryType?: 'Broiler' | 'Layer';
 }
 
 export interface SolverOutput {
@@ -57,291 +63,248 @@ export class FeedOptimizationService {
     /**
      * Optimize feed formulation to minimize cost while meeting nutritional requirements
      */
-    optimizeFormulation(input: SolverInput): SolverOutput {
-        const { targetWeightKg, ingredients, nutritionalTarget } = input;
+    async optimizeFormulation(input: SolverInput): Promise<SolverOutput> {
+        const { targetWeightKg, ingredients, nutritionalTarget, feedCategory } = input;
         const strategy = input.strategy || FormulationStrategy.LEAST_COST;
 
-        // Strategy-specific adjustments
-        // ECONOMY: Minimize cost, allow more tolerance (use cheap ingredients)
-        // BALANCED: Moderate cost optimization with tighter tolerance
-        // PREMIUM: Force high-quality protein sources
+        // Fetch dynamic configuration
+        const configs = await configService.getAll();
+        const maizeMult = configs.maize_preference_multiplier || 0.9999;
+        const minAnimalProteinPct = configs.min_animal_protein_percent || 10;
+        const bloodMealMaxRatio = configs.blood_meal_max_ratio || 10;
 
         let adjustedTolerance = input.tolerance || 2;
 
-        // Track which ingredients to include/exclude or require minimum amounts
-        let minHighProteinPct = 0;  // Minimum % from ingredients with protein > 40%
-        let maxCheapPct = 100;      // Maximum % from cheap ingredients (< ₦300/kg)
+        // Strategy-specific adjustments
+        let strategyHighProteinMin = 0;
+        let strategyCheapMax = 100;
 
         if (strategy === FormulationStrategy.LEAST_COST) {
-            // Economy: LOOSEST tolerance, pure cost minimization
-            // Allow more deviation from targets = can use cheaper ingredients
-            adjustedTolerance = adjustedTolerance + 6; // 8% tolerance (loose)
-            maxCheapPct = 100; // No limit on cheap ingredients
-            minHighProteinPct = 0; // No requirement for expensive proteins
+            adjustedTolerance = adjustedTolerance + 6;
+            strategyCheapMax = 100;
         } else if (strategy === FormulationStrategy.BALANCED) {
-            // Balanced: moderate tolerance, some quality requirements
-            adjustedTolerance = adjustedTolerance + 3; // 5% tolerance
-            maxCheapPct = 60; // Max 60% from cheap ingredients
-            minHighProteinPct = 20; // At least 20% from high-protein sources
+            adjustedTolerance = adjustedTolerance + 4;
+            strategyCheapMax = 80; // Relaxed from 60
+            strategyHighProteinMin = 20;
         } else if (strategy === FormulationStrategy.PREMIUM) {
-            // Premium: TIGHTEST tolerance, force expensive quality ingredients
-            adjustedTolerance = Math.max(1, adjustedTolerance); // 2% tolerance (strictest)
-            maxCheapPct = 30; // Max 30% from cheap ingredients
-            minHighProteinPct = 50; // At least 50% from high-protein sources
+            adjustedTolerance = Math.max(1, adjustedTolerance);
+            strategyCheapMax = 50; // Relaxed from 30
+            strategyHighProteinMin = 40; // Relaxed from 50
         }
 
         const effectiveTarget = { ...nutritionalTarget };
+
+        // Species checks
+        const isCatfish = feedCategory === 'Catfish';
+        const isPoultry = feedCategory === 'Poultry';
+        if (isPoultry) {
+            // Poultry specific logic can go here if needed
+        }
+        const requiresAnimalProtein = ingredients.some(i => i.tags?.includes('ANIMAL_PROTEIN')) || isCatfish;
 
         // Build the linear programming model
         const model: any = {
             optimize: 'cost',
             opType: 'min',
             constraints: {
-                // Total weight constraint
                 weight: { equal: targetWeightKg },
-                // High-protein ingredient minimum (for quality)
-                high_protein: { min: (minHighProteinPct / 100) * targetWeightKg },
-                // Cheap ingredient maximum (to prevent all-cheap formulas in premium)
-                cheap_max: { max: (maxCheapPct / 100) * targetWeightKg }
+                strategy_high_protein: { min: (strategyHighProteinMin / 100) * targetWeightKg },
+                strategy_cheap_max: { max: (strategyCheapMax / 100) * targetWeightKg },
+                // NEW: Animal Protein requirement (for Catfish only)
+                ...(isCatfish ? { total_animal_protein: { min: (minAnimalProteinPct / 100) * targetWeightKg } } : {}),
+                // NEW: Blood Meal Limit (10% of total animal protein)
+                ...(requiresAnimalProtein ? { blood_meal_ratio: { max: 0 } } : {})
             },
             variables: {},
-            ints: {}  // Integer programming for bag constraints
+            ints: {}
         };
-
-
 
         // Add nutritional constraints
         this.addNutritionalConstraints(model, effectiveTarget, targetWeightKg, adjustedTolerance);
 
-        console.log('Effective target nutrients:', JSON.stringify(effectiveTarget, null, 2));
-        console.log('Model after adding nutritional constraints:', JSON.stringify(model.constraints, null, 2));
-
         // Add each ingredient as a variable
         ingredients.forEach((ing: IngredientForSolver) => {
             const varName = ing.id;
+            const isMaize = ing.name.toUpperCase().includes('MAIZE');
+            const isBloodMeal = ing.name.toUpperCase().includes('BLOOD MEAL');
+            const isAnimalProtein = ing.tags?.includes('ANIMAL_PROTEIN') || isBloodMeal;
+
+            // Apply Maize Dominance penalty (slightly lower price for maize to favor it)
+            const adjustedPrice = isMaize ? ing.price * maizeMult : ing.price;
 
             model.variables[varName] = {
-                cost: ing.price,
-                weight: 1,  // 1kg = 1kg
-                // Mark if this is a high-protein ingredient (protein > 40%)
-                high_protein: ing.nutrients.protein > 40 ? 1 : 0,
-                // Mark if this is a cheap ingredient (price < ₦300/kg)
-                cheap_max: ing.price < 300 ? 1 : 0
+                cost: adjustedPrice,
+                weight: 1,
+                strategy_high_protein: ing.nutrients.protein > 40 ? 1 : 0,
+                strategy_cheap_max: ing.price < 300 ? 1 : 0,
+                ...(isCatfish ? { total_animal_protein: isAnimalProtein ? 1 : 0 } : {}),
+                ...(requiresAnimalProtein ? { blood_meal_ratio: isBloodMeal ? (1 - bloodMealMaxRatio / 100) : (isAnimalProtein ? (-bloodMealMaxRatio / 100) : 0) } : {})
             };
 
-            // Add nutritional contributions for each constraint
-            const nutrients = ['protein', 'fat', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
+            // Add nutritional contributions
+            const nutrients = ['protein', 'fat', 'carbohydrate', 'energy', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
             nutrients.forEach(nutrient => {
-                const val = (ing.nutrients as any)[nutrient] / 100;
+                let val = (ing.nutrients as any)[nutrient];
+
+                // Pct based nutrients need to be /100 for weight-based math
+                if (nutrient !== 'energy') {
+                    val = val / 100;
+                }
+
+                // NEW: Bioavailable Phosphorus Weighting
+                if (nutrient === 'phosphorous') {
+                    const bioa = ing.nutrients.phosphorusBioavailability ?? 1.0;
+                    val = val * bioa;
+                }
+
                 model.variables[varName][`${nutrient}_min`] = val;
                 model.variables[varName][`${nutrient}_max`] = val;
             });
 
-            // Add inclusion constraints (min/max %)
+            // Inclusion constraints
             if (ing.constraints.max_inclusion !== undefined) {
                 const maxKg = (ing.constraints.max_inclusion / 100) * targetWeightKg;
-                const constraintName = `${varName}_max`;
-                model.constraints[constraintName] = { max: maxKg };
-                model.variables[varName][constraintName] = 1;
+                model.constraints[`${varName}_max`] = { max: maxKg };
+                model.variables[varName][`${varName}_max`] = 1;
             }
 
             if (ing.constraints.min_inclusion !== undefined) {
                 const minKg = (ing.constraints.min_inclusion / 100) * targetWeightKg;
-                const constraintName = `${varName}_min`;
-                model.constraints[constraintName] = { min: minKg };
-                model.variables[varName][constraintName] = 1;
+                model.constraints[`${varName}_min`] = { min: minKg };
+                model.variables[varName][`${varName}_min`] = 1;
             }
         });
 
-
-        console.log('=== SOLVER DEBUG ===');
-        console.log('Target weight:', targetWeightKg);
-        console.log('Strategy:', strategy);
-        console.log('Ingredients count:', ingredients.length);
-        console.log('Model constraints:', JSON.stringify(model.constraints, null, 2));
-
-        // Solve the linear programming problem
+        // Solve
         let result = solver.Solve(model);
 
-        console.log('Solver result feasible:', result.feasible);
-        console.log('Solver result:', JSON.stringify(result, null, 2));
-
-        // FALLBACK LOGIC: If full optimization fails, try "Essential Only" mode
+        // Fallback Logic
         if (!result.feasible) {
-            // Start fresh with only core constraints
             const fallbackModel: any = {
                 optimize: 'cost',
                 opType: 'min',
-                constraints: {
-                    weight: { equal: targetWeightKg }
-                },
-                variables: model.variables, // Reuse variables from original model
+                constraints: { weight: { equal: targetWeightKg } },
+                variables: model.variables,
                 ints: model.ints
             };
 
-            // Add ONLY Protein and Fat (the essentials)
-            const essentials = ['protein', 'fat'];
-            const allNutrients = ['protein', 'fat', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
-            allNutrients.forEach(nutrient => {
-                if (!essentials.includes(nutrient)) return;
-
+            // Essentials: Protein, Fat, Energy
+            const essentials = ['protein', 'fat', 'energy'];
+            essentials.forEach(nutrient => {
                 const targetRange = (effectiveTarget as any)[nutrient];
-                if (!targetRange) return;
-
-                if (targetRange.min !== undefined) {
-                    const minWithTolerance = targetRange.min * (1 - adjustedTolerance / 100);
-                    const minKg = (minWithTolerance / 100) * targetWeightKg;
-                    fallbackModel.constraints[`${nutrient}_min`] = { min: minKg };
+                if (targetRange && targetRange.min !== undefined) {
+                    const minWithTol = targetRange.min * (1 - adjustedTolerance / 100);
+                    fallbackModel.constraints[`${nutrient}_min`] = { min: (minWithTol / 100) * targetWeightKg };
                 }
-                // No max constraints for essentials in fallback to maximize feasibility
-            });
-
-            // Re-add inclusion constraints (MAIZE max etc)
-            ingredients.forEach(ing => {
-                if (ing.constraints.max_inclusion !== undefined) {
-                    const maxKg = (ing.constraints.max_inclusion / 100) * targetWeightKg;
-                    const constraintName = `${ing.id}_max`;
-                    fallbackModel.constraints[constraintName] = { max: maxKg };
-                    fallbackModel.variables[ing.id][constraintName] = 1; // Ensure variable links to constraint
-                }
-                // Min inclusion constraints are generally harder to satisfy, so we omit them in fallback
             });
 
             result = solver.Solve(fallbackModel);
 
             if (!result.feasible) {
-                // Analyze why it failed and provide helpful suggestions
-                const suggestions = this.analyzeInfeasibility(ingredients, nutritionalTarget);
-
                 return {
                     strategy,
                     ingredientQuantities: {},
                     totalCost: 0,
                     actualNutrients: this.createEmptyNutrients(),
                     feasible: false,
-                    message: suggestions
+                    message: this.analyzeInfeasibility(ingredients, nutritionalTarget)
                 };
             }
         }
 
-        // Extract ingredient quantities
+        // Process results
         const quantities: Record<string, number> = {};
         ingredients.forEach(ing => {
             const qty = result[ing.id] || 0;
-            if (qty > 0) {
-                quantities[ing.id] = qty;
-            }
+            if (qty > 0) quantities[ing.id] = qty;
         });
 
-        // Calculate actual cost using ORIGINAL prices (not strategy-adjusted)
         let actualTotalCost = 0;
         Object.keys(quantities).forEach(ingId => {
             const originalIng = ingredients.find(i => i.id === ingId);
-            if (originalIng) {
-                actualTotalCost += quantities[ingId] * originalIng.price;
-            }
+            if (originalIng) actualTotalCost += quantities[ingId] * originalIng.price;
         });
 
-        // Calculate actual nutrients achieved
-        const actualNutrients = this.calculateActualNutrients(quantities, ingredients, targetWeightKg);
+        const actualNutrients = await this.calculateActualNutrients(quantities, ingredients, targetWeightKg);
 
         return {
             strategy,
             ingredientQuantities: quantities,
-            totalCost: actualTotalCost,  // Use recalculated actual cost
+            totalCost: actualTotalCost,
             actualNutrients,
             feasible: true,
             message: result.result === undefined ? 'Solution found using essential nutrients only.' : undefined
         };
     }
 
-    /**
-     * Add nutritional constraints to the LP model
-     */
-    private addNutritionalConstraints(
-        model: any,
-        target: NutritionalTarget,
-        targetWeight: number,
-        tolerance: number
-    ): void {
-        const nutrients = ['protein', 'fat', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
-
-        console.log('=== addNutritionalConstraints DEBUG ===');
-        console.log('Target object:', JSON.stringify(target));
-        console.log('Tolerance:', tolerance);
+    private addNutritionalConstraints(model: any, target: NutritionalTarget, targetWeight: number, tolerance: number): void {
+        const nutrients = ['protein', 'fat', 'carbohydrate', 'energy', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
 
         nutrients.forEach(nutrient => {
             const targetRange = (target as any)[nutrient];
-            console.log(`Nutrient: ${nutrient}, Range:`, targetRange);
+            if (!targetRange) return;
 
-            if (!targetRange) {
-                console.log(`  -> SKIPPED (no target range)`);
-                return;
-            }
+            const isEnergy = nutrient === 'energy';
 
             if (targetRange.min !== undefined) {
-                // Minimum requirement with tolerance (in kg, not %)
-                const minWithTolerance = targetRange.min * (1 - tolerance / 100);
-                const minKg = (minWithTolerance / 100) * targetWeight;
-                model.constraints[`${nutrient}_min`] = { min: minKg };
-                console.log(`  -> Added ${nutrient}_min: ${minKg}`);
+                // For energy, target is kcal/kg. minTotalEnergy = target * totalWeight
+                // For others, target is %. minTotalKg = (target/100) * totalWeight
+                const minVal = isEnergy
+                    ? targetRange.min * (1 - tolerance / 100) * targetWeight
+                    : (targetRange.min * (1 - tolerance / 100) / 100) * targetWeight;
+                model.constraints[`${nutrient}_min`] = { min: minVal };
             }
 
-
             if (targetRange.max !== undefined) {
-                // Determine if this is a "hard" constraint or a "soft" recommendation
-                // We treat fiber, ash, calcium, and phosphorous as soft maximums to ensure feasibility
                 const softNutrients = ['fiber', 'ash', 'calcium', 'phosphorous'];
-                const isSoft = softNutrients.includes(nutrient);
+                if (softNutrients.includes(nutrient)) return;
 
-                if (isSoft) {
-                    // Skip binding maximum for soft nutrients in the solver
-                    // They will still be flagged in the compliance report
-                    return;
-                }
-
-                // Maximum allowance with tolerance (in kg, not %)
-                // e.g. if target max is 1.5%, solver accepts 1.5 * (1 + 0.06) = 1.59%
-                const maxWithTolerance = targetRange.max * (1 + tolerance / 100);
-                const maxKg = (maxWithTolerance / 100) * targetWeight;
-                model.constraints[`${nutrient}_max`] = { max: maxKg };
+                const maxVal = isEnergy
+                    ? targetRange.max * (1 + tolerance / 100) * targetWeight
+                    : (targetRange.max * (1 + tolerance / 100) / 100) * targetWeight;
+                model.constraints[`${nutrient}_max`] = { max: maxVal };
             }
         });
     }
 
-    /**
-     * Calculate actual nutrients achieved in the formulation
-     */
-    private calculateActualNutrients(
-        quantities: Record<string, number>,
-        ingredients: IngredientForSolver[],
-        totalWeight: number
-    ): INutrients {
+    private async calculateActualNutrients(quantities: Record<string, number>, ingredients: IngredientForSolver[], totalWeight: number): Promise<INutrients> {
+        const configs = await configService.getAll();
+        const m1 = configs.energy_protein_mult || 4;
+        const m2 = configs.energy_carb_mult || 4;
+        const m3 = configs.energy_fat_mult || 9;
+        const m4 = configs.energy_global_mult || 10;
+
         const nutrients: any = {
-            protein: 0,
-            fat: 0,
-            fiber: 0,
-            ash: 0,
-            lysine: 0,
-            methionine: 0,
-            calcium: 0,
-            phosphorous: 0
+            protein: 0, fat: 0, carbohydrate: 0, energy: 0, fiber: 0, ash: 0, lysine: 0, methionine: 0, calcium: 0, phosphorous: 0
         };
 
-        // Calculate weighted average
         Object.keys(nutrients).forEach(nutrient => {
-            let totalNutrientKg = 0;
-
+            let totalKg = 0;
             ingredients.forEach(ing => {
                 const qty = quantities[ing.id] || 0;
-                const nutrientPercent = (ing.nutrients as any)[nutrient] || 0;
-                const nutrientKg = (nutrientPercent / 100) * qty;
-                totalNutrientKg += nutrientKg;
-            });
+                let pct = (ing.nutrients as any)[nutrient] || 0;
 
-            // Convert back to percentage
-            nutrients[nutrient] = totalWeight > 0 ? (totalNutrientKg / totalWeight) * 100 : 0;
+                // Weight by Bioavailability for report
+                if (nutrient === 'phosphorous') {
+                    const bioa = ing.nutrients.phosphorusBioavailability ?? 1.0;
+                    pct = pct * bioa;
+                }
+
+                if (nutrient === 'energy') {
+                    totalKg += pct * qty; // qty is kg, pct is kcal/kg
+                } else {
+                    totalKg += (pct / 100) * qty;
+                }
+            });
+            if (nutrient === 'energy') {
+                nutrients[nutrient] = totalWeight > 0 ? totalKg / totalWeight : 0;
+            } else {
+                nutrients[nutrient] = totalWeight > 0 ? (totalKg / totalWeight) * 100 : 0;
+            }
         });
+
+        // Recalculate Energy based on ACHIEVED Protein, Carb, Fat
+        nutrients.energy = ((nutrients.protein * m1) + (nutrients.carbohydrate * m2) + (nutrients.fat * m3)) * m4;
 
         return nutrients as INutrients;
     }
@@ -387,12 +350,15 @@ export class FeedOptimizationService {
         return {
             protein: 0,
             fat: 0,
+            carbohydrate: 0,
+            energy: 0,
             fiber: 0,
             ash: 0,
             lysine: 0,
             methionine: 0,
             calcium: 0,
-            phosphorous: 0
+            phosphorous: 0,
+            phosphorusBioavailability: 1.0
         };
     }
 
@@ -405,44 +371,79 @@ export class FeedOptimizationService {
     ): string {
         const suggestions: string[] = [];
 
-        // Calculate max achievable protein from selected ingredients
-        const maxProtein = Math.max(...ingredients.map(i => i.nutrients.protein));
-        const avgProtein = ingredients.reduce((sum, i) => sum + i.nutrients.protein, 0) / ingredients.length;
+        // 1. Check for ingredients with missing data
+        const emptyIngredients = ingredients.filter(i =>
+            i.nutrients.protein === 0 &&
+            i.nutrients.energy === 0 &&
+            i.nutrients.fat === 0
+        );
+        if (emptyIngredients.length > 0) {
+            suggestions.push(`Some ingredients have no nutritional data: ${emptyIngredients.map(i => i.name).join(', ')}. Please update them in the database or select different ones.`);
+        }
 
-        // Check if protein target is achievable
+        // 2. Protein Check
+        const maxProtein = Math.max(0, ...ingredients.map(i => i.nutrients.protein));
         const proteinTarget = target.protein?.min || 0;
         if (proteinTarget > 0 && maxProtein < proteinTarget) {
-            suggestions.push(`Need higher protein ingredients. Your highest is ${maxProtein}% but target needs ${proteinTarget}%. Add FISHMEAL or BLOOD MEAL.`);
-        } else if (avgProtein < proteinTarget * 0.6) {
-            suggestions.push(`Too few protein sources. Add more: FISHMEAL 65%, SOYABEAN MEAL, or BLOOD MEAL.`);
+            const hasProteinSource = ingredients.some(i => i.name.includes('FISH') || i.name.includes('SOYA'));
+            if (hasProteinSource && maxProtein < 10) {
+                suggestions.push(`Goal Protein (${proteinTarget}%) is not met because your protein sources (FISHMEAL/SOYA) have 0 or very low protein in the system. Please check ingredient data.`);
+            } else {
+                suggestions.push(`Goal Protein (${proteinTarget}%) is higher than your best source (${maxProtein}%). Add FISHMEAL or SOYABEAN MEAL.`);
+            }
         }
 
-        // Check fat sources
-        const maxFat = Math.max(...ingredients.map(i => i.nutrients.fat));
-        const fatTarget = target.fat?.min || 0;
-        if (fatTarget > 0 && maxFat < fatTarget) {
-            suggestions.push(`Need fat sources. Add PALM OIL or FISH OIL.`);
+        // 3. Energy Check
+        const maxEnergy = Math.max(0, ...ingredients.map(i => i.nutrients.energy));
+        const energyTarget = target.energy?.min || 0;
+        if (energyTarget > 0 && maxEnergy < energyTarget) {
+            const hasEnergySource = ingredients.some(i => i.name.includes('MAIZE') || i.name.includes('PALM OIL'));
+            if (hasEnergySource && maxEnergy < 100) {
+                suggestions.push(`Goal Energy (${energyTarget} kcal/kg) is not met because your energy sources (MAIZE/PALM OIL) have 0 energy in the system. Please check ingredient data.`);
+            } else {
+                suggestions.push(`Goal Energy (${energyTarget} kcal/kg) is higher than your best source (${maxEnergy} kcal/kg). Add PALM OIL or MAIZE.`);
+            }
         }
 
-        // Check amino acids
+        // 4. Calcium & Phosphorus Check
+        const maxCalcium = Math.max(0, ...ingredients.map(i => i.nutrients.calcium));
+        const calciumTarget = target.calcium?.min || 0;
+        if (calciumTarget > 0 && maxCalcium < calciumTarget) {
+            suggestions.push(`Calcium target (${calciumTarget}%) is too high for your current ingredients. Add LIMESTONE, OYSTER SHELL or BONE MEAL.`);
+        }
+
+        const maxPhosphorus = Math.max(0, ...ingredients.map(i => i.nutrients.phosphorous));
+        const phosphorusTarget = target.phosphorous?.min || 0;
+        if (phosphorusTarget > 0 && maxPhosphorus < phosphorusTarget) {
+            suggestions.push(`Phosphorus target (${phosphorusTarget}%) is too high. Add DICALCIUM PHOSPHATE or BONE MEAL.`);
+        }
+
+        // 5. Fiber (Maximum) Check
+        const minFiber = Math.min(100, ...ingredients.map(i => i.nutrients.fiber));
+        const fiberMax = target.fiber?.max ?? 100;
+        if (minFiber > fiberMax) {
+            suggestions.push(`Fiber limit (${fiberMax}%) is too strict for your ingredients. Your lowest fiber source is ${minFiber}%. Remove high-fiber hulls or offals.`);
+        }
+
+        // 6. Amino Acids
         const hasLysine = ingredients.some(i => i.nutrients.lysine > 2);
         const hasMethionine = ingredients.some(i => i.nutrients.methionine > 1);
         if (target.lysine?.min && !hasLysine) {
-            suggestions.push(`Missing LYSINE source. Add LYSINE supplement or FISHMEAL.`);
+            suggestions.push(`Missing concentrated LYSINE source. Add LYSINE supplement.`);
         }
         if (target.methionine?.min && !hasMethionine) {
-            suggestions.push(`Missing METHIONINE source. Add METHIONINE supplement.`);
+            suggestions.push(`Missing concentrated METHIONINE source. Add METHIONINE supplement.`);
         }
 
-        // Check ingredient variety
+        // Variety Check
         if (ingredients.length < 5) {
-            suggestions.push(`Only ${ingredients.length} ingredients selected. Add at least 5-8 for a balanced formula.`);
+            suggestions.push(`Using only ${ingredients.length} ingredients makes it hard to balance. Add at least 6-8 ingredients.`);
         }
 
-        // Default message if no specific issue found
+        // Default fallback
         if (suggestions.length === 0) {
-            suggestions.push(`The selected ingredients cannot meet the nutritional targets.`);
-            suggestions.push(`Try adding: FISHMEAL 65%, SOYABEAN MEAL, MAIZE, PALM OIL, BONE MEAL, LYSINE, METHIONINE.`);
+            suggestions.push(`The combination of selected ingredients cannot meet the nutritional standard.`);
+            suggestions.push(`Try adding concentrated sources: FISHMEAL, SOYABEAN MEAL, BONE MEAL, and PALM OIL.`);
         }
 
         return suggestions.join(' ');

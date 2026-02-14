@@ -49,6 +49,9 @@ export interface IFormulation extends Document {
     isUnlocked: boolean;
     unlockedAt?: Date;
 
+    // Configuration Snapshot (mults, ratios, etc)
+    configSnapshot?: Record<string, any>;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -56,6 +59,8 @@ export interface IFormulation extends Document {
 const NutrientsAtMomentSchema = new Schema({
     protein: { type: Number, required: true },
     fat: { type: Number, required: true },
+    carbohydrate: { type: Number, required: true, default: 0 },
+    energy: { type: Number, required: true, default: 0 },
     fiber: { type: Number, required: true },
     ash: { type: Number, required: true },
     lysine: { type: Number, required: true },
@@ -161,6 +166,8 @@ const FormulationSchema = new Schema<IFormulation>({
     actualNutrients: {
         protein: { type: Number, required: true },
         fat: { type: Number, required: true },
+        carbohydrate: { type: Number, required: true, default: 0 },
+        energy: { type: Number, required: true, default: 0 },
         fiber: { type: Number, required: true },
         ash: { type: Number, required: true },
         lysine: { type: Number, required: true },
@@ -183,6 +190,9 @@ const FormulationSchema = new Schema<IFormulation>({
     },
     unlockedAt: {
         type: Date
+    },
+    configSnapshot: {
+        type: Schema.Types.Mixed
     }
 }, {
     timestamps: true

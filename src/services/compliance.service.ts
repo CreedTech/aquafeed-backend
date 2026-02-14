@@ -6,6 +6,7 @@ export interface ComplianceResult {
     color: ComplianceColor;
     qualityMatch: number;  // 0-100%
     deviations: NutrientDeviation[];
+    violations?: string[]; // inclusion limit violations
 }
 
 export interface NutrientDeviation {
@@ -34,7 +35,10 @@ export class ComplianceService {
     checkCompliance(
         actualNutrients: INutrients,
         targetNutrients: ITargetNutrients,
-        tolerance: number = 2
+        tolerance: number = 2,
+        ingredientMix?: { name: string; qtyKg: number; tags?: string[] }[],
+        targetWeight?: number,
+        categoryInfo?: { feedCategory: string; poultryType?: string }
     ): ComplianceResult {
         const deviations: NutrientDeviation[] = [];
 
@@ -44,7 +48,7 @@ export class ComplianceService {
         let aboveCount = 0;
 
         // Check each nutrient
-        const nutrients = ['protein', 'fat', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
+        const nutrients = ['protein', 'fat', 'carbohydrate', 'energy', 'fiber', 'ash', 'lysine', 'methionine', 'calcium', 'phosphorous'];
 
         nutrients.forEach(nutrient => {
             const targetRange = (targetNutrients as any)[nutrient] as INutrientRange | undefined;
@@ -87,18 +91,86 @@ export class ComplianceService {
             nutrientCount++;
         });
 
+        // Add Inclusion Violations check would happen here if we had the ingredient mix
+        // But ComplianceService usually only sees the final nutrient profile.
+        // We'll extend checkCompliance to optionally take ingredientsUsed
+
+
         // Calculate quality match percentage
         const avgDeviation = nutrientCount > 0 ? totalDeviation / nutrientCount : 0;
         const qualityMatch = Math.max(0, 100 - avgDeviation);
 
+        // NEW: Inclusion Violations
+        const violations: string[] = [];
+        if (ingredientMix && targetWeight && categoryInfo) {
+            this.checkInclusionViolations(ingredientMix, targetWeight, categoryInfo, violations);
+        }
+
         // Determine color code
-        const color = this.determineColor(belowCount, aboveCount, nutrientCount);
+        let color = this.determineColor(belowCount, aboveCount, nutrientCount);
+        if (violations.length > 0) color = 'Red'; // Violations force Red status
 
         return {
             color,
-            qualityMatch: Math.round(qualityMatch * 10) / 10,  // Round to 1 decimal
-            deviations
+            qualityMatch: Math.round(qualityMatch * 10) / 10,
+            deviations,
+            violations: violations.length > 0 ? violations : undefined
         };
+    }
+
+    private checkInclusionViolations(
+        ingredientMix: { name: string; qtyKg: number; tags?: string[] }[],
+        targetWeight: number,
+        categoryInfo: { feedCategory: string; poultryType?: string },
+        violations: string[]
+    ) {
+        const { feedCategory, poultryType } = categoryInfo;
+        let totalAnimalProtein = 0;
+        let bloodMealWeight = 0;
+
+        ingredientMix.forEach(ing => {
+            const name = ing.name.toUpperCase();
+            const inclusionPct = (ing.qtyKg / targetWeight) * 100;
+            const isAnimal = ing.tags?.includes('ANIMAL_PROTEIN') || name.includes('FISHMEAL') || name.includes('BLOOD MEAL');
+            const isBloodMeal = name.includes('BLOOD MEAL');
+
+            if (isAnimal) totalAnimalProtein += ing.qtyKg;
+            if (isBloodMeal) bloodMealWeight += ing.qtyKg;
+
+            // PKC Limits
+            if (name.includes('PKC') || name.includes('PALM KERNEL')) {
+                if (feedCategory === 'Poultry') {
+                    if (poultryType === 'Broiler' && inclusionPct > 0) {
+                        violations.push('PKC should not be used in Broiler feed.');
+                    } else if (poultryType === 'Layer' && inclusionPct > 20) {
+                        violations.push(`PKC inclusion (${inclusionPct.toFixed(1)}%) exceeds 20% limit for Layers.`);
+                    }
+                }
+            }
+
+            // Sorghum Limits
+            if (name.includes('SORGHUM')) {
+                if (feedCategory === 'Poultry' && inclusionPct > 15) {
+                    violations.push(`Sorghum inclusion (${inclusionPct.toFixed(1)}%) exceeds 15% limit for Poultry.`);
+                }
+            }
+        });
+
+        // Animal Protein Min for Catfish
+        if (feedCategory === 'Catfish') {
+            const animalPct = (totalAnimalProtein / targetWeight) * 100;
+            if (animalPct < 10) {
+                violations.push(`Total Animal Protein (${animalPct.toFixed(1)}%) is below the 10% minimum for Catfish.`);
+            }
+
+            // Blood Meal ratio
+            if (totalAnimalProtein > 0) {
+                const bmRatio = (bloodMealWeight / totalAnimalProtein) * 100;
+                if (bmRatio > 10) {
+                    violations.push(`Blood Meal exceeds 10% of total animal protein (${bmRatio.toFixed(1)}%).`);
+                }
+            }
+        }
     }
 
     /**
@@ -185,15 +257,17 @@ export class ComplianceService {
         report += `${'='.repeat(60)}\n`;
 
         deviations.forEach(dev => {
+            const unit = dev.nutrient === 'energy' ? ' kcal/kg' : '%';
+
             const targetStr = typeof dev.target === 'number'
-                ? `${dev.target.toFixed(2)}%`
-                : `${dev.target.min}-${dev.target.max}%`;
+                ? `${dev.target.toFixed(0)}${unit}`
+                : `${dev.target.min}-${dev.target.max}${unit}`;
 
             const statusIcon = dev.status === 'Below' ? '⬇️'
                 : dev.status === 'Above' ? '⬆️'
                     : '✅';
 
-            report += `${statusIcon} ${dev.nutrient}: ${dev.actual.toFixed(2)}% (Target: ${targetStr}, Deviation: ${dev.deviationPercent.toFixed(1)}%)\n`;
+            report += `${statusIcon} ${dev.nutrient}: ${dev.actual.toFixed(dev.nutrient === 'energy' ? 0 : 2)}${unit} (Target: ${targetStr}, Deviation: ${dev.deviationPercent.toFixed(1)}%)\n`;
         });
 
         return report;

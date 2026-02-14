@@ -10,7 +10,8 @@
     "start": "node dist/app.js",
     "seed": "ts-node src/scripts/seedIngredients.ts",
     "seed:standards": "ts-node src/scripts/seedFeedStandards.ts",
-    "seed:all": "npm run seed && npm run seed:standards",
+    "seed:configs": "ts-node src/scripts/seedConfigurations.ts",
+    "seed:all": "npm run seed && npm run seed:standards && npm run seed:configs",
     "create-admin": "ts-node src/scripts/createAdmin.ts",
     "lint": "eslint src/**/*.ts",
     "test": "jest"

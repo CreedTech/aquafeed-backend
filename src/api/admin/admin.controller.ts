@@ -4,6 +4,8 @@ import FarmProfile from '../../models/FarmProfile';
 import Transaction from '../../models/Transaction';
 import Ingredient from '../../models/Ingredient';
 import Formulation from '../../models/Formulation';
+import Configuration from '../../models/Configuration';
+import FeedTemplate from '../../models/FeedTemplate';
 
 /**
  * Get all users with pagination and filtering
@@ -509,6 +511,102 @@ export const bulkDeleteFarms = async (req: Request, res: Response) => {
         res.json({ message: `Successfully deleted ${ids.length} farms` });
     } catch (error) {
         console.error('Bulk Delete Farms Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+/**
+ * Get all system configurations
+ */
+export const getConfigurations = async (_req: Request, res: Response) => {
+    try {
+        const configurations = await Configuration.find().sort({ category: 1, key: 1 });
+        res.json({ configurations });
+    } catch (error) {
+        console.error('Get Configurations Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Update a specific configuration
+ */
+export const updateConfiguration = async (req: Request, res: Response) => {
+    try {
+        const { key } = req.params;
+        const { value } = req.body;
+        const userId = (req as any).user?._id;
+
+        const config = await Configuration.findOneAndUpdate(
+            { key },
+            { value, updatedBy: userId },
+            { new: true, upsert: true }
+        );
+
+        res.json({ message: 'Configuration updated successfully', configuration: config });
+    } catch (error) {
+        console.error('Update Configuration Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Admin: Get all feed templates
+ */
+export const getAllTemplatesAdmin = async (_req: Request, res: Response) => {
+    try {
+        const templates = await FeedTemplate.find().sort({ name: 1 });
+        res.json({ templates });
+    } catch (error) {
+        console.error('Get All Templates Admin Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Admin: Create a new feed template
+ */
+export const createTemplateAdmin = async (req: Request, res: Response) => {
+    try {
+        const template = await FeedTemplate.create(req.body);
+        res.status(201).json({ message: 'Template created', template });
+    } catch (error) {
+        console.error('Create Template Admin Error:', error);
+        res.status(400).json({ error: 'Failed to create template' });
+    }
+};
+
+/**
+ * Admin: Update a feed template
+ */
+export const updateTemplateAdmin = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const template = await FeedTemplate.findByIdAndUpdate(id, req.body, { new: true });
+        if (!template) {
+            res.status(404).json({ error: 'Template not found' });
+            return;
+        }
+        res.json({ message: 'Template updated', template });
+    } catch (error) {
+        console.error('Update Template Admin Error:', error);
+        res.status(400).json({ error: 'Failed to update template' });
+    }
+};
+
+/**
+ * Admin: Delete a feed template
+ */
+export const deleteTemplateAdmin = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const template = await FeedTemplate.findByIdAndDelete(id);
+        if (!template) {
+            res.status(404).json({ error: 'Template not found' });
+            return;
+        }
+        res.json({ message: 'Template deleted' });
+    } catch (error) {
+        console.error('Delete Template Admin Error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 };
