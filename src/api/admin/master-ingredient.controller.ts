@@ -65,3 +65,16 @@ export const deleteIngredient = async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 };
+
+/**
+ * Get all ingredients
+ */
+export const getAllIngredients = async (_req: Request, res: Response) => {
+    try {
+        const ingredients = await Ingredient.find().sort({ name: 1 });
+        res.json({ ingredients });
+    } catch (error) {
+        console.error('Get All Ingredients Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
