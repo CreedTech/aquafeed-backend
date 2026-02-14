@@ -37,6 +37,13 @@ const getWebhookSignature = (req: Request): string | null => {
     return header;
 };
 
+const escapeHtml = (value: string): string => value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 const isDuplicateReferenceError = (error: unknown): boolean => {
     if (!error || typeof error !== 'object') return false;
     const maybeMongoError = error as { code?: number };
@@ -395,10 +402,19 @@ export const handleWebhook = async (req: Request, res: Response) => {
 export const paymentCallback = async (req: Request, res: Response) => {
     const reference = typeof req.query.reference === 'string'
         ? req.query.reference
-        : '';
+        : (typeof req.query.trxref === 'string' ? req.query.trxref : '');
     const status = typeof req.query.status === 'string'
         ? req.query.status
         : '';
+    const safeReference = escapeHtml(reference);
+    const safeStatus = escapeHtml(status);
+    const deepLinkQuery = new URLSearchParams({
+        ...(reference ? { reference } : {}),
+        ...(status ? { status } : {}),
+        source: 'paystack'
+    });
+    const deepLink = `aquafeed:///payment/callback${deepLinkQuery.toString() ? `?${deepLinkQuery.toString()}` : ''}`;
+    const safeDeepLink = escapeHtml(deepLink);
 
     res.status(200).type('html').send(`
 <!doctype html>
@@ -409,19 +425,37 @@ export const paymentCallback = async (req: Request, res: Response) => {
     <title>Payment Return</title>
     <style>
       body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f7f7f8; color: #111827; }
-      .card { max-width: 520px; margin: 48px auto; background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+      .card { max-width: 560px; margin: 48px auto; background: #fff; border-radius: 12px; padding: 22px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
       h1 { margin: 0 0 12px; font-size: 20px; }
       p { margin: 8px 0; line-height: 1.5; }
       code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
+      .actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+      .btn { display: inline-block; text-decoration: none; border-radius: 8px; padding: 10px 14px; font-weight: 600; font-size: 14px; }
+      .btn-primary { background: #0ea27e; color: #fff; }
+      .btn-secondary { background: #f3f4f6; color: #111827; }
+      .muted { color: #6b7280; font-size: 13px; }
     </style>
   </head>
-  <body>
+  <body onload="openApp()">
     <div class="card">
       <h1>Payment Return</h1>
-      <p>Your checkout flow is complete. Return to the AquaFeed app and tap <strong>Verify</strong> to credit your wallet.</p>
-      ${status ? `<p>Status: <code>${status}</code></p>` : ''}
-      ${reference ? `<p>Reference: <code>${reference}</code></p>` : ''}
+      <p>Redirecting back to AquaFeed app now. If it does not open automatically, tap the button below.</p>
+      ${safeStatus ? `<p>Status: <code>${safeStatus}</code></p>` : ''}
+      ${safeReference ? `<p>Reference: <code>${safeReference}</code></p>` : ''}
+      <div class="actions">
+        <a class="btn btn-primary" href="${safeDeepLink}">Open AquaFeed App</a>
+      </div>
+      <p class="muted">Once the app opens, payment verification runs automatically and you will be taken to Wallet.</p>
     </div>
+    <script>
+      function openApp() {
+        const deepLink = "${safeDeepLink}";
+        window.location.href = deepLink;
+        setTimeout(function () {
+          window.location.href = deepLink;
+        }, 1200);
+      }
+    </script>
   </body>
 </html>`);
 };
