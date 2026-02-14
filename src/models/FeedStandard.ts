@@ -8,6 +8,8 @@ export interface INutrientRange {
 export interface ITargetNutrients {
     protein: INutrientRange;
     fat: INutrientRange;
+    carbohydrate?: INutrientRange;
+    energy?: INutrientRange;
     fiber: INutrientRange;
     ash?: INutrientRange;
     lysine?: INutrientRange;
@@ -19,8 +21,10 @@ export interface ITargetNutrients {
 export interface IFeedStandard extends Document {
     name: string;
     brand: string;
+    feedCategory: 'Catfish' | 'Poultry';
+    poultryType?: 'Broiler' | 'Layer';
     pelletSize: string;  // 2mm, 3mm, 4.5mm, etc.
-    fishType: string;  // Dynamic from Categories
+    fishType?: string;    // Dynamic from Categories (Conditional for Catfish)
     stage: string;       // Dynamic from Categories
     targetNutrients: ITargetNutrients;
     tolerance: number;  // % deviation allowed (default 6%)
@@ -36,14 +40,16 @@ const NutrientRangeSchema = new Schema({
 }, { _id: false });
 
 const TargetNutrientsSchema = new Schema<ITargetNutrients>({
-    protein: { type: NutrientRangeSchema, required: true },
-    fat: { type: NutrientRangeSchema, required: true },
-    fiber: { type: NutrientRangeSchema, required: true },
-    ash: { type: NutrientRangeSchema },
-    lysine: { type: NutrientRangeSchema },
-    methionine: { type: NutrientRangeSchema },
-    calcium: { type: NutrientRangeSchema },
-    phosphorous: { type: NutrientRangeSchema }
+    protein: { type: NutrientRangeSchema as any, required: true },
+    fat: { type: NutrientRangeSchema as any, required: true },
+    carbohydrate: { type: NutrientRangeSchema as any },
+    energy: { type: NutrientRangeSchema as any },
+    fiber: { type: NutrientRangeSchema as any, required: true },
+    ash: { type: NutrientRangeSchema as any },
+    lysine: { type: NutrientRangeSchema as any },
+    methionine: { type: NutrientRangeSchema as any },
+    calcium: { type: NutrientRangeSchema as any },
+    phosphorous: { type: NutrientRangeSchema as any }
 }, { _id: false });
 
 const FeedStandardSchema = new Schema<IFeedStandard>({
@@ -58,13 +64,24 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
         required: true,
         index: true
     },
+    feedCategory: {
+        type: String,
+        enum: ['Catfish', 'Poultry'],
+        default: 'Catfish',
+        required: true,
+        index: true
+    },
+    poultryType: {
+        type: String,
+        enum: ['Broiler', 'Layer'],
+        index: true
+    },
     pelletSize: {
         type: String,
         required: true
     },
     fishType: {
         type: String,
-        required: true,
         index: true
     },
     stage: {
@@ -95,6 +112,7 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
 });
 
 // Update index prefix for fishType/stage
-FeedStandardSchema.index({ fishType: 1, stage: 1, isActive: 1 });
+FeedStandardSchema.index({ feedCategory: 1, fishType: 1, stage: 1, isActive: 1 });
+FeedStandardSchema.index({ feedCategory: 1, poultryType: 1, stage: 1, isActive: 1 });
 
 export default mongoose.model<IFeedStandard>('FeedStandard', FeedStandardSchema);
