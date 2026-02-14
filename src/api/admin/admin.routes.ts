@@ -3,6 +3,8 @@ import { requireAdmin } from '../../middleware/auth.middleware';
 import * as adminController from './admin.controller';
 import * as ingredientController from './master-ingredient.controller';
 import * as categoryController from './category.controller';
+import * as standardController from './standard.controller';
+import * as alternativeRuleController from './alternative-rule.controller';
 
 const router = Router();
 
@@ -28,6 +30,18 @@ router.get('/ingredients', ingredientController.getAllIngredients);
 router.post('/ingredients', ingredientController.createIngredient);
 router.put('/ingredients/:id', ingredientController.updateIngredient);
 router.delete('/ingredients/:id', ingredientController.deleteIngredient);
+
+// Feed Standards Management
+router.get('/standards', standardController.getAllStandardsAdmin);
+router.post('/standards', standardController.createStandardAdmin);
+router.put('/standards/:id', standardController.updateStandardAdmin);
+router.delete('/standards/:id', standardController.deleteStandardAdmin);
+
+// Alternative Rules Management
+router.get('/alternatives/rules', alternativeRuleController.getAlternativeRulesAdmin);
+router.post('/alternatives/rules', alternativeRuleController.createAlternativeRuleAdmin);
+router.put('/alternatives/rules/:id', alternativeRuleController.updateAlternativeRuleAdmin);
+router.delete('/alternatives/rules/:id', alternativeRuleController.deleteAlternativeRuleAdmin);
 
 // Formulations (Read-only for admin - but allowed to delete)
 router.get('/formulations', adminController.getAllFormulations);

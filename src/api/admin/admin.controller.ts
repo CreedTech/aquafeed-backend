@@ -6,6 +6,19 @@ import Ingredient from '../../models/Ingredient';
 import Formulation from '../../models/Formulation';
 import Configuration from '../../models/Configuration';
 import FeedTemplate from '../../models/FeedTemplate';
+import { Types } from 'mongoose';
+import { configService } from '../../services/config.service';
+
+const CANONICAL_UNLOCK_FEE_KEY = 'formulation_fee';
+const LEGACY_UNLOCK_FEE_KEY = 'formulation_unlock_fee';
+type ConfigurationRecord = {
+    key: string;
+    value: unknown;
+    description?: string;
+    category: 'FINANCIAL' | 'SCIENTIFIC' | 'SOLVER' | 'SYSTEM';
+    updatedAt?: Date;
+    [key: string]: unknown;
+};
 
 /**
  * Get all users with pagination and filtering
@@ -519,7 +532,57 @@ export const bulkDeleteFarms = async (req: Request, res: Response) => {
  */
 export const getConfigurations = async (_req: Request, res: Response) => {
     try {
-        const configurations = await Configuration.find().sort({ category: 1, key: 1 });
+        const rawConfigurations = await Configuration.find()
+            .sort({ category: 1, key: 1 })
+            .lean<ConfigurationRecord[]>();
+
+        const canonicalUnlockFee = rawConfigurations.find(
+            (config) => config.key === CANONICAL_UNLOCK_FEE_KEY
+        );
+        const legacyUnlockFee = rawConfigurations.find(
+            (config) => config.key === LEGACY_UNLOCK_FEE_KEY
+        );
+
+        const effectiveUnlockFee = (() => {
+            if (canonicalUnlockFee && legacyUnlockFee) {
+                const canonicalUpdatedAt = canonicalUnlockFee.updatedAt
+                    ? new Date(canonicalUnlockFee.updatedAt).getTime()
+                    : 0;
+                const legacyUpdatedAt = legacyUnlockFee.updatedAt
+                    ? new Date(legacyUnlockFee.updatedAt).getTime()
+                    : 0;
+
+                return canonicalUpdatedAt >= legacyUpdatedAt
+                    ? canonicalUnlockFee
+                    : legacyUnlockFee;
+            }
+            return canonicalUnlockFee || legacyUnlockFee;
+        })();
+
+        const configurations = rawConfigurations
+            .filter(
+                (config) =>
+                    config.key !== CANONICAL_UNLOCK_FEE_KEY &&
+                    config.key !== LEGACY_UNLOCK_FEE_KEY
+            )
+            .map((config) => ({ ...config }));
+
+        if (effectiveUnlockFee) {
+            configurations.push({
+                ...effectiveUnlockFee,
+                key: CANONICAL_UNLOCK_FEE_KEY,
+                description:
+                    effectiveUnlockFee.description ||
+                    'Cost to unlock a full formulation recipe in Naira'
+            });
+        }
+
+        configurations.sort((a, b) => {
+            const categoryCompare = a.category.localeCompare(b.category);
+            if (categoryCompare !== 0) return categoryCompare;
+            return a.key.localeCompare(b.key);
+        });
+
         res.json({ configurations });
     } catch (error) {
         console.error('Get Configurations Error:', error);
@@ -535,12 +598,20 @@ export const updateConfiguration = async (req: Request, res: Response) => {
         const { key } = req.params;
         const { value } = req.body;
         const userId = (req as any).user?._id;
+        const normalizedKey = key === LEGACY_UNLOCK_FEE_KEY ? CANONICAL_UNLOCK_FEE_KEY : key;
 
         const config = await Configuration.findOneAndUpdate(
-            { key },
+            { key: normalizedKey },
             { value, updatedBy: userId },
             { new: true, upsert: true }
         );
+
+        if (normalizedKey === CANONICAL_UNLOCK_FEE_KEY) {
+            await Configuration.deleteOne({ key: LEGACY_UNLOCK_FEE_KEY });
+        }
+
+        // Ensure runtime readers get the latest values immediately.
+        configService.clearCache();
 
         res.json({ message: 'Configuration updated successfully', configuration: config });
     } catch (error) {
@@ -554,8 +625,40 @@ export const updateConfiguration = async (req: Request, res: Response) => {
  */
 export const getAllTemplatesAdmin = async (_req: Request, res: Response) => {
     try {
-        const templates = await FeedTemplate.find().sort({ name: 1 });
-        res.json({ templates });
+        const templates = await FeedTemplate.find().sort({ name: 1 }).lean();
+
+        const uniqueIngredientNames = Array.from(new Set(
+            templates.flatMap((template) => template.ingredientNames || [])
+        ));
+
+        const ingredients = await Ingredient.find({
+            name: { $in: uniqueIngredientNames }
+        }).select('_id name').lean();
+        const ingredientIdByName = new Map<string, string>(
+            ingredients.map((ingredient) => [ingredient.name, ingredient._id.toString()])
+        );
+
+        const hydrated = templates.map((template) => {
+            const totalWeight = 100;
+            const ingredientCount = (template.ingredientNames || []).length || 1;
+            const ratioPerIngredient = Number((100 / ingredientCount).toFixed(4));
+
+            return {
+                ...template,
+                feedType: template.feedCategory === 'Poultry' ? 'poultry' : 'fish',
+                fishSubtype: template.feedCategory === 'Poultry' ? undefined : 'catfish',
+                totalWeight,
+                items: (template.ingredientNames || [])
+                    .map((name) => ({
+                        ingredientId: ingredientIdByName.get(name) || '',
+                        ratio: ratioPerIngredient,
+                        ingredientName: name
+                    }))
+                    .filter((item) => item.ingredientId !== '')
+            };
+        });
+
+        res.json({ templates: hydrated });
     } catch (error) {
         console.error('Get All Templates Admin Error:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -567,7 +670,42 @@ export const getAllTemplatesAdmin = async (_req: Request, res: Response) => {
  */
 export const createTemplateAdmin = async (req: Request, res: Response) => {
     try {
-        const template = await FeedTemplate.create(req.body);
+        const {
+            items,
+            ingredientNames,
+            feedType,
+            fishSubtype,
+            feedCategory,
+            ...rest
+        } = req.body as {
+            items?: Array<{ ingredientId: string; ratio: number }>;
+            ingredientNames?: string[];
+            feedType?: 'fish' | 'poultry';
+            fishSubtype?: string;
+            feedCategory?: 'Catfish' | 'Poultry';
+            [key: string]: unknown;
+        };
+
+        let mappedIngredientNames: string[] = ingredientNames || [];
+        if (Array.isArray(items) && items.length > 0) {
+            const ingredientIds = items
+                .map((item) => item.ingredientId)
+                .filter((id): id is string => Types.ObjectId.isValid(id));
+            const ingredients = await Ingredient.find({ _id: { $in: ingredientIds } })
+                .select('name')
+                .lean();
+            mappedIngredientNames = ingredients.map((ingredient) => ingredient.name);
+        }
+
+        const normalizedFeedCategory = feedCategory
+            || (feedType === 'poultry' ? 'Poultry' : 'Catfish');
+
+        const template = await FeedTemplate.create({
+            ...rest,
+            feedCategory: normalizedFeedCategory,
+            fishSubtype,
+            ingredientNames: mappedIngredientNames
+        });
         res.status(201).json({ message: 'Template created', template });
     } catch (error) {
         console.error('Create Template Admin Error:', error);
@@ -581,7 +719,41 @@ export const createTemplateAdmin = async (req: Request, res: Response) => {
 export const updateTemplateAdmin = async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
-        const template = await FeedTemplate.findByIdAndUpdate(id, req.body, { new: true });
+        const {
+            items,
+            ingredientNames,
+            feedType,
+            feedCategory,
+            ...rest
+        } = req.body as {
+            items?: Array<{ ingredientId: string; ratio: number }>;
+            ingredientNames?: string[];
+            feedType?: 'fish' | 'poultry';
+            feedCategory?: 'Catfish' | 'Poultry';
+            [key: string]: unknown;
+        };
+
+        let mappedIngredientNames: string[] | undefined = ingredientNames;
+        if (Array.isArray(items)) {
+            const ingredientIds = items
+                .map((item) => item.ingredientId)
+                .filter((itemId): itemId is string => Types.ObjectId.isValid(itemId));
+            const ingredients = await Ingredient.find({ _id: { $in: ingredientIds } })
+                .select('name')
+                .lean();
+            mappedIngredientNames = ingredients.map((ingredient) => ingredient.name);
+        }
+
+        const normalizedFeedCategory = feedCategory
+            || (feedType ? (feedType === 'poultry' ? 'Poultry' : 'Catfish') : undefined);
+
+        const updatePayload = {
+            ...rest,
+            ...(normalizedFeedCategory ? { feedCategory: normalizedFeedCategory } : {}),
+            ...(mappedIngredientNames ? { ingredientNames: mappedIngredientNames } : {})
+        };
+
+        const template = await FeedTemplate.findByIdAndUpdate(id, updatePayload, { new: true });
         if (!template) {
             res.status(404).json({ error: 'Template not found' });
             return;

@@ -1,9 +1,9 @@
 // @ts-ignore - javascript-lp-solver doesn't have TypeScript types
 import solver from 'javascript-lp-solver';
-import { INutrients, IIngredient } from '../models/Ingredient';
+import { INutrients } from '../models/Ingredient';
 import { configService } from './config.service';
 
-export interface IngredientForSolver extends Partial<IIngredient> {
+export interface IngredientForSolver {
     id: string;
     name: string;
     price: number;  // ₦/kg
@@ -14,6 +14,7 @@ export interface IngredientForSolver extends Partial<IIngredient> {
     };
     bagWeight?: number | null;
     tags?: string[];
+    alternatives?: string[];
 }
 
 export interface NutritionalTarget {
@@ -52,6 +53,43 @@ export interface SolverOutput {
     actualNutrients: INutrients;
     feasible: boolean;
     message?: string;
+    infeasibility?: InfeasibilityAnalysis;
+}
+
+export interface ConstraintViolation {
+    constraintId: string;
+    type:
+    | 'nutrient_min'
+    | 'nutrient_max'
+    | 'ingredient_data'
+    | 'business_rule'
+    | 'ingredient_limit';
+    nutrient?: string;
+    current: number;
+    required: number;
+    gap: number;
+    unit: '%' | 'kcal/kg' | 'flag';
+    message: string;
+}
+
+export interface RecommendedAction {
+    actionType:
+    | 'APPLY_SUGGESTED_RELAXATION'
+    | 'TRY_ALTERNATIVE_INGREDIENTS'
+    | 'ADJUST_QUANTITY_OR_TARGETS'
+    | 'EDIT_INGREDIENT_LIMITS';
+    label: string;
+    description: string;
+    patch: Record<string, unknown>;
+    estimatedCostDelta: number;
+    estimatedComplianceDelta: number;
+    confidence: number;
+}
+
+export interface InfeasibilityAnalysis {
+    summary: string;
+    violations: ConstraintViolation[];
+    recommendedActions: RecommendedAction[];
 }
 
 /**
@@ -70,7 +108,10 @@ export class FeedOptimizationService {
         // Fetch dynamic configuration
         const configs = await configService.getAll();
         const maizeMult = configs.maize_preference_multiplier || 0.9999;
-        const minAnimalProteinPct = configs.min_animal_protein_percent || 10;
+        const minAnimalProteinPct =
+            configs.min_animal_protein_percent
+            || configs.min_animal_protein_pct
+            || 10;
         const bloodMealMaxRatio = configs.blood_meal_max_ratio || 10;
 
         let adjustedTolerance = input.tolerance || 2;
@@ -201,13 +242,20 @@ export class FeedOptimizationService {
             result = solver.Solve(fallbackModel);
 
             if (!result.feasible) {
+                const infeasibility = this.analyzeInfeasibility(
+                    ingredients,
+                    nutritionalTarget,
+                    targetWeightKg,
+                    isCatfish
+                );
                 return {
                     strategy,
                     ingredientQuantities: {},
                     totalCost: 0,
                     actualNutrients: this.createEmptyNutrients(),
                     feasible: false,
-                    message: this.analyzeInfeasibility(ingredients, nutritionalTarget)
+                    message: infeasibility.summary,
+                    infeasibility
                 };
             }
         }
@@ -363,13 +411,83 @@ export class FeedOptimizationService {
     }
 
     /**
-     * Analyze why a formulation is infeasible and provide actionable suggestions
+     * Analyze why a formulation is infeasible and provide structured remediation options.
      */
     private analyzeInfeasibility(
         ingredients: IngredientForSolver[],
-        target: NutritionalTarget
-    ): string {
+        target: NutritionalTarget,
+        targetWeightKg: number,
+        isCatfish: boolean
+    ): InfeasibilityAnalysis {
+        const violations: ConstraintViolation[] = [];
         const suggestions: string[] = [];
+        const unitByNutrient: Record<string, '%' | 'kcal/kg'> = {
+            protein: '%',
+            fat: '%',
+            carbohydrate: '%',
+            energy: 'kcal/kg',
+            fiber: '%',
+            ash: '%',
+            lysine: '%',
+            methionine: '%',
+            calcium: '%',
+            phosphorous: '%'
+        };
+        const nutrientLabel: Record<string, string> = {
+            protein: 'Protein',
+            fat: 'Fat',
+            carbohydrate: 'Carbohydrate',
+            energy: 'Energy',
+            fiber: 'Fiber',
+            ash: 'Ash',
+            lysine: 'Lysine',
+            methionine: 'Methionine',
+            calcium: 'Calcium',
+            phosphorous: 'Phosphorous'
+        };
+
+        // Nutrient-based infeasibility checks
+        const nutrients = Object.keys(unitByNutrient);
+        nutrients.forEach((nutrient) => {
+            const targetRange = (target as unknown as Record<string, { min?: number; max?: number } | undefined>)[nutrient];
+            if (!targetRange) return;
+
+            const values = ingredients.map(i => (i.nutrients as unknown as Record<string, number | undefined>)[nutrient] || 0);
+            const bestValue = values.length > 0 ? Math.max(...values) : 0;
+            const lowestValue = values.length > 0 ? Math.min(...values) : 0;
+
+            if (targetRange.min !== undefined && bestValue < targetRange.min) {
+                const gap = targetRange.min - bestValue;
+                const message = `${nutrientLabel[nutrient]} minimum (${targetRange.min.toFixed(2)}${unitByNutrient[nutrient]}) is above the best selected ingredient (${bestValue.toFixed(2)}${unitByNutrient[nutrient]}).`;
+                violations.push({
+                    constraintId: `${nutrient}_min`,
+                    type: 'nutrient_min',
+                    nutrient,
+                    current: Number(bestValue.toFixed(4)),
+                    required: Number(targetRange.min.toFixed(4)),
+                    gap: Number(gap.toFixed(4)),
+                    unit: unitByNutrient[nutrient],
+                    message
+                });
+                suggestions.push(message);
+            }
+
+            if (targetRange.max !== undefined && lowestValue > targetRange.max) {
+                const gap = lowestValue - targetRange.max;
+                const message = `${nutrientLabel[nutrient]} maximum (${targetRange.max.toFixed(2)}${unitByNutrient[nutrient]}) is below the lowest selected ingredient (${lowestValue.toFixed(2)}${unitByNutrient[nutrient]}).`;
+                violations.push({
+                    constraintId: `${nutrient}_max`,
+                    type: 'nutrient_max',
+                    nutrient,
+                    current: Number(lowestValue.toFixed(4)),
+                    required: Number(targetRange.max.toFixed(4)),
+                    gap: Number(gap.toFixed(4)),
+                    unit: unitByNutrient[nutrient],
+                    message
+                });
+                suggestions.push(message);
+            }
+        });
 
         // 1. Check for ingredients with missing data
         const emptyIngredients = ingredients.filter(i =>
@@ -378,61 +496,70 @@ export class FeedOptimizationService {
             i.nutrients.fat === 0
         );
         if (emptyIngredients.length > 0) {
-            suggestions.push(`Some ingredients have no nutritional data: ${emptyIngredients.map(i => i.name).join(', ')}. Please update them in the database or select different ones.`);
+            const message = `Some ingredients have no nutritional data: ${emptyIngredients.map(i => i.name).join(', ')}.`;
+            violations.push({
+                constraintId: 'ingredient_data_missing',
+                type: 'ingredient_data',
+                current: 0,
+                required: 1,
+                gap: 1,
+                unit: 'flag',
+                message
+            });
+            suggestions.push(`${message} Update the ingredient data or replace them.`);
         }
 
-        // 2. Protein Check
-        const maxProtein = Math.max(0, ...ingredients.map(i => i.nutrients.protein));
-        const proteinTarget = target.protein?.min || 0;
-        if (proteinTarget > 0 && maxProtein < proteinTarget) {
-            const hasProteinSource = ingredients.some(i => i.name.includes('FISH') || i.name.includes('SOYA'));
-            if (hasProteinSource && maxProtein < 10) {
-                suggestions.push(`Goal Protein (${proteinTarget}%) is not met because your protein sources (FISHMEAL/SOYA) have 0 or very low protein in the system. Please check ingredient data.`);
-            } else {
-                suggestions.push(`Goal Protein (${proteinTarget}%) is higher than your best source (${maxProtein}%). Add FISHMEAL or SOYABEAN MEAL.`);
+        // Catfish rule checks
+        if (isCatfish) {
+            const animalProteinCandidates = ingredients.filter(i => i.tags?.includes('ANIMAL_PROTEIN'));
+            if (animalProteinCandidates.length === 0) {
+                const message = 'Catfish feed requires at least one animal-protein ingredient.';
+                violations.push({
+                    constraintId: 'total_animal_protein',
+                    type: 'business_rule',
+                    current: 0,
+                    required: 1,
+                    gap: 1,
+                    unit: 'flag',
+                    message
+                });
+                suggestions.push(message);
+            }
+
+            const bloodMeal = ingredients.find(i => i.name.toUpperCase().includes('BLOOD MEAL'));
+            const totalAnimalCandidates = Math.max(animalProteinCandidates.length, 1);
+            if (bloodMeal && totalAnimalCandidates === 1) {
+                const message = 'Blood meal cannot be the only animal-protein source due to digestibility constraints.';
+                violations.push({
+                    constraintId: 'blood_meal_ratio',
+                    type: 'business_rule',
+                    current: 100,
+                    required: 10,
+                    gap: 90,
+                    unit: '%',
+                    message
+                });
+                suggestions.push(message);
             }
         }
 
-        // 3. Energy Check
-        const maxEnergy = Math.max(0, ...ingredients.map(i => i.nutrients.energy));
-        const energyTarget = target.energy?.min || 0;
-        if (energyTarget > 0 && maxEnergy < energyTarget) {
-            const hasEnergySource = ingredients.some(i => i.name.includes('MAIZE') || i.name.includes('PALM OIL'));
-            if (hasEnergySource && maxEnergy < 100) {
-                suggestions.push(`Goal Energy (${energyTarget} kcal/kg) is not met because your energy sources (MAIZE/PALM OIL) have 0 energy in the system. Please check ingredient data.`);
-            } else {
-                suggestions.push(`Goal Energy (${energyTarget} kcal/kg) is higher than your best source (${maxEnergy} kcal/kg). Add PALM OIL or MAIZE.`);
-            }
-        }
-
-        // 4. Calcium & Phosphorus Check
-        const maxCalcium = Math.max(0, ...ingredients.map(i => i.nutrients.calcium));
-        const calciumTarget = target.calcium?.min || 0;
-        if (calciumTarget > 0 && maxCalcium < calciumTarget) {
-            suggestions.push(`Calcium target (${calciumTarget}%) is too high for your current ingredients. Add LIMESTONE, OYSTER SHELL or BONE MEAL.`);
-        }
-
-        const maxPhosphorus = Math.max(0, ...ingredients.map(i => i.nutrients.phosphorous));
-        const phosphorusTarget = target.phosphorous?.min || 0;
-        if (phosphorusTarget > 0 && maxPhosphorus < phosphorusTarget) {
-            suggestions.push(`Phosphorus target (${phosphorusTarget}%) is too high. Add DICALCIUM PHOSPHATE or BONE MEAL.`);
-        }
-
-        // 5. Fiber (Maximum) Check
-        const minFiber = Math.min(100, ...ingredients.map(i => i.nutrients.fiber));
-        const fiberMax = target.fiber?.max ?? 100;
-        if (minFiber > fiberMax) {
-            suggestions.push(`Fiber limit (${fiberMax}%) is too strict for your ingredients. Your lowest fiber source is ${minFiber}%. Remove high-fiber hulls or offals.`);
-        }
-
-        // 6. Amino Acids
-        const hasLysine = ingredients.some(i => i.nutrients.lysine > 2);
-        const hasMethionine = ingredients.some(i => i.nutrients.methionine > 1);
-        if (target.lysine?.min && !hasLysine) {
-            suggestions.push(`Missing concentrated LYSINE source. Add LYSINE supplement.`);
-        }
-        if (target.methionine?.min && !hasMethionine) {
-            suggestions.push(`Missing concentrated METHIONINE source. Add METHIONINE supplement.`);
+        // Hard ingredient inclusion limits can over-constrain.
+        const tightLimits = ingredients.filter(i =>
+            i.constraints.max_inclusion !== undefined &&
+            i.constraints.max_inclusion <= 15
+        );
+        if (tightLimits.length > 0) {
+            const message = `Tight max inclusion limits detected (${tightLimits.map(i => `${i.name}: ${i.constraints.max_inclusion}%`).join(', ')}).`;
+            violations.push({
+                constraintId: 'ingredient_limit_cluster',
+                type: 'ingredient_limit',
+                current: tightLimits.length,
+                required: 0,
+                gap: tightLimits.length,
+                unit: 'flag',
+                message
+            });
+            suggestions.push(`${message} Consider relaxing one or two limits.`);
         }
 
         // Variety Check
@@ -440,13 +567,83 @@ export class FeedOptimizationService {
             suggestions.push(`Using only ${ingredients.length} ingredients makes it hard to balance. Add at least 6-8 ingredients.`);
         }
 
+        // Recommended actions (for one-tap buttons in client apps)
+        const recommendedActions: RecommendedAction[] = [];
+        const nutrientMinViolation = violations.find(v => v.type === 'nutrient_min');
+        if (nutrientMinViolation) {
+            recommendedActions.push({
+                actionType: 'APPLY_SUGGESTED_RELAXATION',
+                label: 'Apply suggested relaxation',
+                description: 'Loosen the tightest nutrient minimum slightly and rerun optimization.',
+                patch: {
+                    nutrient: nutrientMinViolation.nutrient,
+                    operation: 'relax_min',
+                    delta: Number((Math.max(0.2, nutrientMinViolation.gap * 0.35)).toFixed(3))
+                },
+                estimatedCostDelta: -2.5,
+                estimatedComplianceDelta: 8.0,
+                confidence: 0.78
+            });
+        }
+
+        if (ingredients.some(i => (i.alternatives || []).length > 0)) {
+            recommendedActions.push({
+                actionType: 'TRY_ALTERNATIVE_INGREDIENTS',
+                label: 'Try alternative ingredients',
+                description: 'Swap one constrained ingredient with its mapped alternative and rerun.',
+                patch: {
+                    operation: 'try_alternatives',
+                    ingredientIds: ingredients
+                        .filter(i => (i.alternatives || []).length > 0)
+                        .map(i => i.id)
+                },
+                estimatedCostDelta: -4.2,
+                estimatedComplianceDelta: 6.5,
+                confidence: 0.72
+            });
+        }
+
+        if (tightLimits.length > 0) {
+            recommendedActions.push({
+                actionType: 'EDIT_INGREDIENT_LIMITS',
+                label: 'Edit ingredient limits',
+                description: 'Increase one or more max inclusion caps and rerun.',
+                patch: {
+                    operation: 'relax_ingredient_max',
+                    ingredientIds: tightLimits.map(i => i.id),
+                    deltaPercent: 5
+                },
+                estimatedCostDelta: 1.2,
+                estimatedComplianceDelta: 10.5,
+                confidence: 0.74
+            });
+        }
+
+        recommendedActions.push({
+            actionType: 'ADJUST_QUANTITY_OR_TARGETS',
+            label: 'Adjust quantity/targets',
+            description: 'Preview with a smaller batch or slightly easier nutrient target.',
+            patch: {
+                operation: 'adjust_target',
+                targetWeightKg: Math.max(10, Number((targetWeightKg * 0.9).toFixed(1))),
+                nutrientDeltaPct: 2
+            },
+            estimatedCostDelta: -10,
+            estimatedComplianceDelta: 4,
+            confidence: 0.65
+        });
+
         // Default fallback
         if (suggestions.length === 0) {
             suggestions.push(`The combination of selected ingredients cannot meet the nutritional standard.`);
             suggestions.push(`Try adding concentrated sources: FISHMEAL, SOYABEAN MEAL, BONE MEAL, and PALM OIL.`);
         }
 
-        return suggestions.join(' ');
+        return {
+            summary: suggestions.join(' '),
+            violations,
+            recommendedActions
+        };
     }
 }
 

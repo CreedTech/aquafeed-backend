@@ -61,6 +61,24 @@ const configs = [
         value: 10,
         description: 'Maximum percentage of Blood Meal relative to TOTAL animal protein (e.g. 10 means 10%)',
         category: 'SOLVER'
+    },
+    {
+        key: 'suggestion_allow_relaxations',
+        value: true,
+        description: 'Allow one-tap recommended relaxations for infeasible formulations',
+        category: 'SOLVER'
+    },
+    {
+        key: 'suggestion_max_relaxation_step_pct',
+        value: 5,
+        description: 'Maximum nutrient relaxation step (%) allowed per one-tap action',
+        category: 'SOLVER'
+    },
+    {
+        key: 'suggestion_rank_strategy',
+        value: 'cost_first',
+        description: 'Ranking strategy for suggested actions (cost_first/compliance_first/balanced)',
+        category: 'SOLVER'
     }
 ];
 
