@@ -3,12 +3,15 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface INutrients {
     protein: number;      // % Crude Protein
     fat: number;          // % Fat/Oil
+    carbohydrate: number; // % Carbohydrates
+    energy: number;       // ME kcal/kg
     fiber: number;        // % Fiber
     ash: number;          // % Ash
     lysine: number;       // % Lysine
     methionine: number;   // % Methionine
     calcium: number;      // % Calcium
     phosphorous: number;  // % Phosphorous
+    phosphorusBioavailability?: number; // 0.3 for plant, 1.0 for animal/DCP
 }
 
 export interface IConstraints {
@@ -20,6 +23,7 @@ export type IngredientCategory = 'CARBOHYDRATE' | 'PROTEIN' | 'FIBER' | 'MINERAL
 
 export interface IIngredient extends Document {
     name: string;
+    tags: string[]; // ['ANIMAL_PROTEIN', 'PLANT_PROTEIN', 'DCP']
     category: IngredientCategory;
     nutrients: INutrients;
     constraints: IConstraints;
@@ -37,12 +41,15 @@ export interface IIngredient extends Document {
 const NutrientsSchema = new Schema({
     protein: { type: Number, required: true, default: 0 },
     fat: { type: Number, required: true, default: 0 },
+    carbohydrate: { type: Number, required: true, default: 0 },
+    energy: { type: Number, required: true, default: 0 },
     fiber: { type: Number, required: true, default: 0 },
     ash: { type: Number, required: true, default: 0 },
     lysine: { type: Number, required: true, default: 0 },
     methionine: { type: Number, required: true, default: 0 },
     calcium: { type: Number, required: true, default: 0 },
     phosphorous: { type: Number, required: true, default: 0 },
+    phosphorusBioavailability: { type: Number, default: 1.0 },
 }, { _id: false });
 
 const ConstraintsSchema = new Schema({
@@ -58,6 +65,10 @@ const IngredientSchema = new Schema<IIngredient>({
         trim: true,
         index: true
     },
+    tags: [{
+        type: String,
+        trim: true
+    }],
     category: {
         type: String,
         enum: ['CARBOHYDRATE', 'PROTEIN', 'FIBER', 'MINERALS', 'OTHER'],
