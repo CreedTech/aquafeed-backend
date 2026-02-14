@@ -184,6 +184,8 @@ app.use('/api/v1/inventory', inventoryRoutes);
 app.use('/api/v1/batches', batchRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/payments', paymentRoutes);
+// Backward-compatible alias for older integrations using singular path.
+app.use('/api/v1/payment', paymentRoutes);
 app.use('/api/v1/templates', templateRoutes);
 
 // ======================
