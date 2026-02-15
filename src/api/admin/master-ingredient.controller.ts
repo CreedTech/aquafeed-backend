@@ -46,6 +46,11 @@ const normalizeCategory = (value: unknown): string | undefined => {
 
 const ensureValidIngredientCategory = async (category: string | undefined) => {
     if (!category) return true;
+    const configuredCount = await Category.countDocuments({ type: 'ingredient' });
+    if (configuredCount === 0) {
+        // Backward compatibility for environments that have not seeded categories yet.
+        return true;
+    }
     const existing = await Category.findOne({
         type: 'ingredient',
         name: category

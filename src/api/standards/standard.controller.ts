@@ -27,7 +27,7 @@ export const getStandards = async (req: Request, res: Response) => {
         }
 
         if (stage) {
-            query.stage = stage;
+            query.stage = { $regex: `^${String(stage)}$`, $options: 'i' };
         }
 
         if (brand) {

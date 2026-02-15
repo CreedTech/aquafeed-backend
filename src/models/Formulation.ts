@@ -17,6 +17,17 @@ export interface IAlternativeSuggestion {
     savings: number;  // ₦ savings
 }
 
+export interface IFormulationStrategyOption {
+    strategy: string;
+    totalCost: number;
+    costPerKg: number;
+    overheadCost: number;
+    complianceColor: ComplianceColor;
+    qualityMatchPercentage: number;
+    ingredientsUsed: IIngredientUsed[];
+    actualNutrients: INutrients;
+}
+
 export interface IFormulation extends Document {
     userId: mongoose.Types.ObjectId;
     farmId?: mongoose.Types.ObjectId;
@@ -43,6 +54,10 @@ export interface IFormulation extends Document {
 
     // Smart Recommendations
     alternatives: IAlternativeSuggestion[];
+
+    // Per-strategy snapshots generated during optimization.
+    strategyOptions: IFormulationStrategyOption[];
+    selectedStrategy?: string;
 
     // Monetization
     isDemo: boolean;
@@ -104,6 +119,56 @@ const IngredientUsedSchema = new Schema({
 const AlternativeSuggestionSchema = new Schema({
     suggestion: { type: String, required: true },
     savings: { type: Number, required: true }
+}, { _id: false });
+
+const StrategyOptionSchema = new Schema({
+    strategy: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    totalCost: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    costPerKg: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    overheadCost: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    complianceColor: {
+        type: String,
+        enum: ['Red', 'Blue', 'Green'],
+        required: true
+    },
+    qualityMatchPercentage: {
+        type: Number,
+        required: true,
+        min: 0,
+        max: 100
+    },
+    ingredientsUsed: {
+        type: [IngredientUsedSchema],
+        required: true
+    },
+    actualNutrients: {
+        protein: { type: Number, required: true },
+        fat: { type: Number, required: true },
+        carbohydrate: { type: Number, required: true, default: 0 },
+        energy: { type: Number, required: true, default: 0 },
+        fiber: { type: Number, required: true },
+        ash: { type: Number, required: true },
+        lysine: { type: Number, required: true },
+        methionine: { type: Number, required: true },
+        calcium: { type: Number, required: true },
+        phosphorous: { type: Number, required: true }
+    }
 }, { _id: false });
 
 
@@ -178,6 +243,14 @@ const FormulationSchema = new Schema<IFormulation>({
     alternatives: {
         type: [AlternativeSuggestionSchema],
         default: []
+    },
+    strategyOptions: {
+        type: [StrategyOptionSchema],
+        default: []
+    },
+    selectedStrategy: {
+        type: String,
+        trim: true
     },
     isDemo: {
         type: Boolean,

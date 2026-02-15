@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
-export type CategoryType = 'ingredient' | 'fish_type' | 'stage' | 'other';
+export type CategoryType = string;
 
 export interface ICategory extends Document {
     name: string;
@@ -22,7 +22,8 @@ const CategorySchema = new Schema<ICategory>({
     },
     type: {
         type: String,
-        enum: ['ingredient', 'fish_type', 'stage', 'other'],
+        trim: true,
+        lowercase: true,
         required: true,
         index: true
     },
