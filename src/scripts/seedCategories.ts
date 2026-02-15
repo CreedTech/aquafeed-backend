@@ -12,11 +12,16 @@ async function seedCategories() {
         await mongoose.connect(MONGODB_URI);
         console.log('Connected successfully!\n');
 
-        // Default species types
-        const fishTypes = [
+        // Feed domains in scope
+        const feedTypes = [
+            { name: 'FISH', displayName: 'Fish', type: 'feed_type' as const, sortOrder: 1 },
+            { name: 'POULTRY', displayName: 'Poultry', type: 'feed_type' as const, sortOrder: 2 },
+        ];
+
+        // Default fish subtypes
+        const fishSubtypes = [
             { name: 'CATFISH', displayName: 'Catfish', type: 'fish_type' as const, sortOrder: 1 },
             { name: 'TILAPIA', displayName: 'Tilapia', type: 'fish_type' as const, sortOrder: 2 },
-            { name: 'POULTRY', displayName: 'Poultry', type: 'fish_type' as const, sortOrder: 3 },
         ];
 
         // Default stages
@@ -26,23 +31,34 @@ async function seedCategories() {
             { name: 'GROWER', displayName: 'Grower', type: 'stage' as const, sortOrder: 3, description: 'Growing phase' },
             { name: 'FINISHER', displayName: 'Finisher', type: 'stage' as const, sortOrder: 4, description: 'Harvest ready' },
             { name: 'STARTER', displayName: 'Starter', type: 'stage' as const, sortOrder: 5, description: 'Poultry early stage' },
-            { name: 'LAYER_PROD', displayName: 'Layer Production', type: 'stage' as const, sortOrder: 6, description: 'Poultry egg production' },
+            { name: 'BROILER_FINISHER', displayName: 'Broiler Finisher', type: 'stage' as const, sortOrder: 6, description: 'Poultry finishing stage' },
+            { name: 'LAYER_PROD', displayName: 'Layer Production', type: 'stage' as const, sortOrder: 7, description: 'Poultry egg production' },
         ];
 
-        // Default Poultry Types
-        const otherCategories = [
-            { name: 'BROILER', displayName: 'Broiler', type: 'other' as const, sortOrder: 1 },
-            { name: 'LAYER', displayName: 'Layer', type: 'other' as const, sortOrder: 2 },
+        // Default poultry subtypes
+        const poultrySubtypes = [
+            { name: 'BROILER', displayName: 'Broiler', type: 'poultry_type' as const, sortOrder: 1 },
+            { name: 'LAYER', displayName: 'Layer', type: 'poultry_type' as const, sortOrder: 2 },
         ];
 
-        console.log('Seeding fish types...');
-        for (const ft of fishTypes) {
+        console.log('Seeding feed types...');
+        for (const ft of feedTypes) {
             await Category.findOneAndUpdate(
                 { name: ft.name, type: ft.type },
                 { $set: ft },
                 { upsert: true, new: true }
             );
             console.log(`  ✓ ${ft.displayName}`);
+        }
+
+        console.log('\nSeeding fish subtypes...');
+        for (const fishSubtype of fishSubtypes) {
+            await Category.findOneAndUpdate(
+                { name: fishSubtype.name, type: fishSubtype.type },
+                { $set: fishSubtype },
+                { upsert: true, new: true }
+            );
+            console.log(`  ✓ ${fishSubtype.displayName}`);
         }
 
         console.log('\nSeeding stages...');
@@ -55,8 +71,8 @@ async function seedCategories() {
             console.log(`  ✓ ${stage.displayName}`);
         }
 
-        console.log('\nSeeding Poultry Types...');
-        for (const cat of otherCategories) {
+        console.log('\nSeeding poultry subtypes...');
+        for (const cat of poultrySubtypes) {
             await Category.findOneAndUpdate(
                 { name: cat.name, type: cat.type },
                 { $set: cat },
