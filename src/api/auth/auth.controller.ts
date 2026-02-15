@@ -3,6 +3,30 @@ import User from '../../models/User';
 import { generateOTP, storeOTP, verifyOTP } from '../../utils/otp.util';
 import { sendOTP } from '../../services/email.service';
 
+const resolveAuthenticatedUserId = (req: Request): string | null => (
+    req.userId || req.session?.userId || null
+);
+
+const toUserPayload = (user: {
+    _id: unknown;
+    email: string;
+    name?: string;
+    role: string;
+    hasFullAccess: boolean;
+    freeTrialUsed: boolean;
+    formulaCount: number;
+    walletBalance: number;
+}) => ({
+    id: user._id,
+    email: user.email,
+    name: user.name || 'Farmer',
+    role: user.role,
+    hasFullAccess: user.hasFullAccess,
+    freeTrialUsed: user.freeTrialUsed,
+    formulaCount: user.formulaCount,
+    walletBalance: user.walletBalance,
+});
+
 /**
  * Request OTP for login (Passwordless)
  * Uses Gmail SMTP to send OTP
@@ -79,16 +103,7 @@ export const verifyOtp = async (req: Request, res: Response) => {
 
         res.json({
             message: 'Login successful',
-            user: {
-                id: user._id,
-                email: user.email,
-                name: user.name || 'Farmer',
-                role: user.role,
-                hasFullAccess: user.hasFullAccess,
-                freeTrialUsed: user.freeTrialUsed,
-                formulaCount: user.formulaCount,
-                walletBalance: user.walletBalance,
-            },
+            user: toUserPayload(user),
             isNewUser
         });
 
@@ -103,12 +118,13 @@ export const verifyOtp = async (req: Request, res: Response) => {
  */
 export const getCurrentUser = async (req: Request, res: Response) => {
     try {
-        if (!req.session.userId) {
+        const userId = resolveAuthenticatedUserId(req);
+        if (!userId) {
             res.status(401).json({ error: 'Not authenticated' });
             return;
         }
 
-        const user = await User.findById(req.session.userId).select('-__v');
+        const user = await User.findById(userId).select('-__v');
         if (!user) {
             req.session.destroy(() => { });
             res.status(404).json({ error: 'User not found' });
@@ -116,19 +132,80 @@ export const getCurrentUser = async (req: Request, res: Response) => {
         }
 
         res.json({
-            user: {
-                id: user._id,
-                email: user.email,
-                name: user.name || 'Farmer',
-                role: user.role,
-                hasFullAccess: user.hasFullAccess,
-                freeTrialUsed: user.freeTrialUsed,
-                formulaCount: user.formulaCount,
-                walletBalance: user.walletBalance,
-            }
+            user: toUserPayload(user)
         });
     } catch (error) {
         console.error('Get User Error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Update current logged-in user profile
+ */
+export const updateCurrentUser = async (req: Request, res: Response) => {
+    try {
+        const userId = resolveAuthenticatedUserId(req);
+        if (!userId) {
+            res.status(401).json({ error: 'Not authenticated' });
+            return;
+        }
+
+        const setUpdates: Record<string, unknown> = {};
+        const unsetUpdates: Record<string, string> = {};
+
+        if (req.body?.name !== undefined) {
+            const name = String(req.body.name || '').trim();
+            if (!name) {
+                res.status(400).json({ error: 'Name cannot be empty' });
+                return;
+            }
+            if (name.length > 80) {
+                res.status(400).json({ error: 'Name is too long (max 80 characters)' });
+                return;
+            }
+            setUpdates.name = name;
+        }
+
+        if (req.body?.phone !== undefined) {
+            const phone = String(req.body.phone || '').trim();
+            if (!phone) {
+                unsetUpdates.phone = '';
+            } else {
+                const phoneRegex = /^\+?[\d\s-()]+$/;
+                if (!phoneRegex.test(phone)) {
+                    res.status(400).json({ error: 'Please enter a valid phone number' });
+                    return;
+                }
+                setUpdates.phone = phone;
+            }
+        }
+
+        if (Object.keys(setUpdates).length === 0 && Object.keys(unsetUpdates).length === 0) {
+            res.status(400).json({ error: 'No valid fields to update' });
+            return;
+        }
+
+        const user = await User.findByIdAndUpdate(
+            userId,
+            {
+                ...(Object.keys(setUpdates).length > 0 ? { $set: setUpdates } : {}),
+                ...(Object.keys(unsetUpdates).length > 0 ? { $unset: unsetUpdates } : {})
+            },
+            { new: true, runValidators: true }
+        );
+
+        if (!user) {
+            res.status(404).json({ error: 'User not found' });
+            return;
+        }
+
+        res.json({
+            message: 'Profile updated successfully',
+            user: toUserPayload(user)
+        });
+    } catch (error) {
+        console.error('Update User Error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 };
