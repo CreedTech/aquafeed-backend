@@ -1,7 +1,9 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Ingredient from '../../models/Ingredient';
 import FeedStandard, { IFeedStandard } from '../../models/FeedStandard';
 import Formulation from '../../models/Formulation';
+import Transaction from '../../models/Transaction';
 import User from '../../models/User';
 import AlternativeRule from '../../models/AlternativeRule';
 import Configuration from '../../models/Configuration';
@@ -31,6 +33,7 @@ interface FormulationRequestBody {
     batchName?: string;
     overheadCost?: number;
     targetOverrides?: Record<string, { min?: number; max?: number }>;
+    globalTargetRelaxationPct?: number;
 }
 
 interface StructuredInfeasibleResponse {
@@ -135,6 +138,25 @@ const mergeTargets = (
     return merged;
 };
 
+const applyGlobalTargetRelaxation = (
+    target: Record<string, unknown>,
+    relaxationPct?: number
+): Record<string, unknown> => {
+    if (!relaxationPct || relaxationPct <= 0) return target;
+
+    const relaxed: Record<string, unknown> = JSON.parse(JSON.stringify(target));
+    Object.entries(relaxed).forEach(([nutrient, range]) => {
+        if (!range || typeof range !== 'object') return;
+        const typedRange = range as { min?: number; max?: number };
+        relaxed[nutrient] = {
+            ...(typedRange.min !== undefined ? { min: Math.max(0, typedRange.min - relaxationPct) } : {}),
+            ...(typedRange.max !== undefined ? { max: typedRange.max + relaxationPct } : {})
+        };
+    });
+
+    return relaxed;
+};
+
 const coerceFormulationRequest = (body: unknown): FormulationRequestBody => {
     const raw = body as Partial<FormulationRequestBody>;
     return {
@@ -152,7 +174,10 @@ const coerceFormulationRequest = (body: unknown): FormulationRequestBody => {
             : [],
         batchName: raw.batchName,
         overheadCost: raw.overheadCost !== undefined ? Number(raw.overheadCost) : 0,
-        targetOverrides: raw.targetOverrides
+        targetOverrides: raw.targetOverrides,
+        globalTargetRelaxationPct: raw.globalTargetRelaxationPct !== undefined
+            ? Number(raw.globalTargetRelaxationPct)
+            : undefined
     };
 };
 
@@ -214,6 +239,10 @@ const applyActionPatchToRequest = (
         }
         if (typeof patch.nutrientDeltaPct === 'number') {
             const delta = patch.nutrientDeltaPct;
+            nextRequest.globalTargetRelaxationPct = Math.max(
+                0,
+                (nextRequest.globalTargetRelaxationPct || 0) + delta
+            );
             const nutrientOverrides: Record<string, { min?: number; max?: number }> = {};
             Object.entries(nextRequest.targetOverrides || {}).forEach(([nutrient, range]) => {
                 nutrientOverrides[nutrient] = {
@@ -341,7 +370,11 @@ const runFormulationComputation = async (
         _doc?: Record<string, unknown>;
     };
     const baseTarget = rawTarget.toObject ? rawTarget.toObject() : rawTarget._doc || rawTarget as unknown as Record<string, unknown>;
-    const targetNutrients = mergeTargets(baseTarget, targetOverrides);
+    const relaxedBaseTarget = applyGlobalTargetRelaxation(
+        baseTarget,
+        payload.globalTargetRelaxationPct
+    );
+    const targetNutrients = mergeTargets(relaxedBaseTarget, targetOverrides);
 
     const strategies: FormulationStrategy[] = [
         FormulationStrategy.LEAST_COST,
@@ -372,6 +405,14 @@ const runFormulationComputation = async (
         const roundedQuantities = solverService.roundToBags(
             solverResult.ingredientQuantities,
             ingredientsForSolver
+        );
+        const roundedQuantitiesKg = Object.fromEntries(
+            Object.entries(roundedQuantities).map(([ingId, rounded]) => [ingId, rounded.kg])
+        );
+        const roundedActualNutrients = await solverService.calculateActualNutrients(
+            roundedQuantitiesKg,
+            ingredientsForSolver,
+            effectiveWeightKg
         );
 
         let totalCostWithBags = 0;
@@ -411,7 +452,7 @@ const runFormulationComputation = async (
         });
 
         const complianceResult = complianceService.checkCompliance(
-            solverResult.actualNutrients,
+            roundedActualNutrients,
             targetNutrients as unknown as Parameters<typeof complianceService.checkCompliance>[1],
             standard.tolerance,
             recipeSnapshot.map((recipeItem) => ({
@@ -434,7 +475,7 @@ const runFormulationComputation = async (
             nutrientStatuses: complianceResult.deviations,
             totalCost: totalCostWithBags,
             costPerKg: totalCostWithBags / effectiveWeightKg,
-            actualNutrients: solverResult.actualNutrients as unknown as Record<string, number>,
+            actualNutrients: roundedActualNutrients as unknown as Record<string, number>,
             recipe: [...recipeSnapshot, ...autoCalcRecipe],
             overheadCost: Number(overheadCost)
         };
@@ -472,38 +513,76 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             return res.json(toStructuredInfeasibleResponse(computation.standard, computation.infeasibility));
         }
 
-        const referenceOption = computation.feasibleOptions[0];
-        const recipeNames = referenceOption.recipe.map((item) => item.name);
+        const allRecipeNames = Array.from(new Set(
+            computation.feasibleOptions.flatMap((option) => option.recipe.map((item) => item.name))
+        ));
         const snapshotIngredients = await Ingredient.find({
-            name: { $in: recipeNames }
+            name: { $in: allRecipeNames }
         });
         const ingredientByName = new Map(snapshotIngredients.map((ing) => [ing.name, ing]));
 
-        const ingredientsUsed = referenceOption.recipe
-            .map((recipeItem) => {
-                const ingredient = ingredientByName.get(recipeItem.name);
-                if (!ingredient) return null;
+        const mapOptionIngredients = (option: FormulationOption) => (
+            option.recipe
+                .map((recipeItem) => {
+                    const ingredient = ingredientByName.get(recipeItem.name);
+                    if (!ingredient) return null;
+                    return {
+                        ...recipeItem,
+                        ingredientId: ingredient._id,
+                        nutrientsAtMoment: ingredient.nutrients
+                    };
+                })
+                .filter((item): item is {
+                    name: string;
+                    qtyKg: number;
+                    bags: number;
+                    priceAtMoment: number;
+                    ingredientId: typeof snapshotIngredients[number]['_id'];
+                    nutrientsAtMoment: typeof snapshotIngredients[number]['nutrients'];
+                } => item !== null)
+        );
+
+        const strategyOptions = computation.feasibleOptions
+            .map((option) => {
+                const ingredientsUsed = mapOptionIngredients(option);
+                if (ingredientsUsed.length === 0) return null;
                 return {
-                    ...recipeItem,
-                    ingredientId: ingredient._id,
-                    nutrientsAtMoment: ingredient.nutrients
+                    strategy: option.strategy,
+                    totalCost: option.totalCost,
+                    costPerKg: option.costPerKg,
+                    overheadCost: option.overheadCost,
+                    complianceColor: option.complianceColor,
+                    qualityMatchPercentage: option.qualityMatch,
+                    actualNutrients: option.actualNutrients,
+                    ingredientsUsed
                 };
             })
-            .filter((item): item is {
-                name: string;
-                qtyKg: number;
-                bags: number;
-                priceAtMoment: number;
-                ingredientId: typeof snapshotIngredients[number]['_id'];
-                nutrientsAtMoment: typeof snapshotIngredients[number]['nutrients'];
-            } => item !== null);
+            .filter((option): option is {
+                strategy: FormulationStrategy;
+                totalCost: number;
+                costPerKg: number;
+                overheadCost: number;
+                complianceColor: 'Red' | 'Blue' | 'Green';
+                qualityMatchPercentage: number;
+                actualNutrients: Record<string, number>;
+                ingredientsUsed: Array<{
+                    name: string;
+                    qtyKg: number;
+                    bags: number;
+                    priceAtMoment: number;
+                    ingredientId: typeof snapshotIngredients[number]['_id'];
+                    nutrientsAtMoment: typeof snapshotIngredients[number]['nutrients'];
+                }>;
+            } => option !== null);
 
-        if (ingredientsUsed.length === 0) {
+        if (strategyOptions.length === 0) {
             return res.status(400).json({
                 error: 'Unable to persist formulation snapshot',
                 details: 'No recipe ingredients could be resolved in the ingredient catalog.'
             });
         }
+
+        const referenceOption = strategyOptions[0];
 
         const summary = new Formulation({
             userId,
@@ -513,12 +592,13 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             standardUsed: computation.standard._id,
             totalCost: referenceOption.totalCost,
             costPerKg: referenceOption.costPerKg,
-            overheadCost: payload.overheadCost || 0,
+            overheadCost: referenceOption.overheadCost,
             complianceColor: referenceOption.complianceColor,
-            qualityMatchPercentage: referenceOption.qualityMatch,
+            qualityMatchPercentage: referenceOption.qualityMatchPercentage,
             actualNutrients: referenceOption.actualNutrients,
             isDemo: false,
-            ingredientsUsed,
+            ingredientsUsed: referenceOption.ingredientsUsed,
+            strategyOptions,
             configSnapshot: await configService.getAll(),
             isUnlocked: false
         });
@@ -646,7 +726,7 @@ export const evaluateAlternativeOptions = async (req: Request, res: Response) =>
             feedType,
             ingredientIds: ingredientIds.sort()
         });
-        const cached = alternativeCacheService.get<{
+        const cached = await alternativeCacheService.get<{
             suggestions: unknown[];
             feedType: string;
             generatedAt: string;
@@ -709,7 +789,7 @@ export const evaluateAlternativeOptions = async (req: Request, res: Response) =>
             feedType,
             generatedAt: new Date().toISOString()
         };
-        alternativeCacheService.set(cacheKey, responsePayload);
+        await alternativeCacheService.set(cacheKey, responsePayload);
 
         return res.json({
             status: 'computed',
@@ -731,7 +811,7 @@ export const evaluateAlternativeOptions = async (req: Request, res: Response) =>
  */
 export const getAlternativeCacheResult = async (req: Request, res: Response) => {
     const { cacheKey } = req.params;
-    const cached = alternativeCacheService.get<unknown>(cacheKey);
+    const cached = await alternativeCacheService.get<unknown>(cacheKey);
     if (!cached) {
         return res.status(404).json({ error: 'Cache key not found or expired' });
     }
@@ -755,6 +835,84 @@ export const getFormulationPricing = async (_req: Request, res: Response) => {
     }
 };
 
+type StrategySnapshot = {
+    strategy: string;
+    totalCost: number;
+    costPerKg: number;
+    overheadCost?: number;
+    complianceColor: 'Red' | 'Blue' | 'Green';
+    qualityMatchPercentage: number;
+    actualNutrients: Record<string, number>;
+    ingredientsUsed: unknown[];
+};
+
+const normalizeStrategy = (value?: string): string | undefined => {
+    if (!value) return undefined;
+    const normalized = value.trim().toUpperCase();
+    return normalized.length > 0 ? normalized : undefined;
+};
+
+const getStrategySnapshots = (formulation: any): StrategySnapshot[] => {
+    const snapshots = Array.isArray(formulation.strategyOptions)
+        ? formulation.strategyOptions
+        : [];
+    if (snapshots.length > 0) {
+        return snapshots.map((snapshot: any) => ({
+            strategy: normalizeStrategy(snapshot.strategy) || 'LEAST_COST',
+            totalCost: Number(snapshot.totalCost || 0),
+            costPerKg: Number(snapshot.costPerKg || 0),
+            overheadCost: Number(snapshot.overheadCost || 0),
+            complianceColor: snapshot.complianceColor || 'Blue',
+            qualityMatchPercentage: Number(snapshot.qualityMatchPercentage || 0),
+            actualNutrients: snapshot.actualNutrients || {},
+            ingredientsUsed: snapshot.ingredientsUsed || []
+        }));
+    }
+
+    return [{
+        strategy: normalizeStrategy(formulation.selectedStrategy) || 'LEAST_COST',
+        totalCost: Number(formulation.totalCost || 0),
+        costPerKg: Number(formulation.costPerKg || 0),
+        overheadCost: Number(formulation.overheadCost || 0),
+        complianceColor: formulation.complianceColor || 'Blue',
+        qualityMatchPercentage: Number(formulation.qualityMatchPercentage || 0),
+        actualNutrients: formulation.actualNutrients || {},
+        ingredientsUsed: formulation.ingredientsUsed || []
+    }];
+};
+
+const resolveStrategySnapshot = (
+    formulation: any,
+    requestedStrategy?: string
+): StrategySnapshot | null => {
+    const snapshots = getStrategySnapshots(formulation);
+    if (snapshots.length === 0) return null;
+
+    const normalizedRequested = normalizeStrategy(requestedStrategy);
+    if (!normalizedRequested) return snapshots[0];
+
+    const matched = snapshots.find((snapshot) => (
+        normalizeStrategy(snapshot.strategy) === normalizedRequested
+    ));
+    return matched || null;
+};
+
+const toUnlockResponsePayload = (
+    formulation: any,
+    snapshot: StrategySnapshot
+) => ({
+    formulationId: formulation._id,
+    strategy: snapshot.strategy,
+    isUnlocked: true,
+    ingredientsUsed: snapshot.ingredientsUsed,
+    recipe: snapshot.ingredientsUsed,
+    totalCost: snapshot.totalCost,
+    costPerKg: snapshot.costPerKg,
+    complianceColor: snapshot.complianceColor,
+    qualityMatch: snapshot.qualityMatchPercentage,
+    actualNutrients: snapshot.actualNutrients
+});
+
 /**
  * Unlock Formulation (Pay to see full recipe)
  * POST /api/v1/formulations/:id/unlock
@@ -763,59 +921,121 @@ export const unlockFormulation = async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
         const userId = getAuthenticatedUserId(req);
+        const requestedStrategy = typeof req.body?.strategy === 'string'
+            ? req.body.strategy
+            : (typeof req.query.strategy === 'string' ? req.query.strategy : undefined);
         if (!userId) {
             return res.status(401).json({ error: 'Unauthorized. Please log in.' });
         }
 
-        const formulation = await Formulation.findById(id);
-        if (!formulation) {
-            return res.status(404).json({ error: 'Formulation not found' });
-        }
-
-        if (formulation.userId.toString() !== userId) {
-            return res.status(403).json({ error: 'Unauthorized' });
-        }
-
-        if (formulation.isUnlocked) {
-            return res.status(400).json({ error: 'Formulation already unlocked' });
-        }
-
-        // Check wallet balance
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
         const unlockFee = await getConfiguredFormulationFee();
-        if (user.walletBalance < unlockFee) {
-            return res.status(403).json({
-                error: 'Insufficient balance',
-                message: `You need ₦${unlockFee.toLocaleString()} to unlock this formulation. Your current balance is ₦${user.walletBalance.toLocaleString()}.`,
-                requiresDeposit: true,
-                requiredAmount: unlockFee - user.walletBalance
+        let responsePayload: Record<string, unknown> | null = null;
+        let alreadyUnlocked = false;
+        let newBalance: number | null = null;
+
+        const session = await mongoose.startSession();
+        try {
+            await session.withTransaction(async () => {
+                const formulation = await Formulation.findById(id).session(session);
+                if (!formulation) {
+                    throw {
+                        statusCode: 404,
+                        body: { error: 'Formulation not found' }
+                    };
+                }
+
+                if (formulation.userId.toString() !== userId) {
+                    throw {
+                        statusCode: 403,
+                        body: { error: 'Unauthorized' }
+                    };
+                }
+
+                const selectedSnapshot = resolveStrategySnapshot(
+                    formulation,
+                    requestedStrategy
+                );
+                if (!selectedSnapshot) {
+                    const availableStrategies = getStrategySnapshots(formulation)
+                        .map((snapshot) => snapshot.strategy);
+                    throw {
+                        statusCode: 400,
+                        body: {
+                            error: 'Invalid strategy selection',
+                            availableStrategies
+                        }
+                    };
+                }
+
+                if (formulation.isUnlocked) {
+                    alreadyUnlocked = true;
+                    responsePayload = toUnlockResponsePayload(formulation, selectedSnapshot);
+                    return;
+                }
+
+                const user = await User.findById(userId).session(session);
+                if (!user) {
+                    throw {
+                        statusCode: 404,
+                        body: { error: 'User not found' }
+                    };
+                }
+
+                if (user.walletBalance < unlockFee) {
+                    throw {
+                        statusCode: 403,
+                        body: {
+                            error: 'Insufficient balance',
+                            message: `You need ₦${unlockFee.toLocaleString()} to unlock this formulation. Your current balance is ₦${user.walletBalance.toLocaleString()}.`,
+                            requiresDeposit: true,
+                            requiredAmount: unlockFee - user.walletBalance
+                        }
+                    };
+                }
+
+                user.walletBalance -= unlockFee;
+                newBalance = user.walletBalance;
+                await user.save({ session });
+
+                await Transaction.create([{
+                    userId: user._id,
+                    type: 'debit',
+                    amount: unlockFee,
+                    description: `Formulation Unlock (${selectedSnapshot.strategy})`,
+                    status: 'success',
+                    balanceAfter: user.walletBalance,
+                    formulationId: formulation._id
+                }], { session });
+
+                formulation.totalCost = selectedSnapshot.totalCost;
+                formulation.costPerKg = selectedSnapshot.costPerKg;
+                formulation.overheadCost = Number(selectedSnapshot.overheadCost || 0);
+                formulation.complianceColor = selectedSnapshot.complianceColor;
+                formulation.qualityMatchPercentage = selectedSnapshot.qualityMatchPercentage;
+                formulation.actualNutrients = selectedSnapshot.actualNutrients as any;
+                formulation.ingredientsUsed = selectedSnapshot.ingredientsUsed as any;
+                formulation.selectedStrategy = selectedSnapshot.strategy;
+                formulation.isUnlocked = true;
+                formulation.unlockedAt = new Date();
+                await formulation.save({ session });
+
+                responsePayload = toUnlockResponsePayload(formulation, selectedSnapshot);
             });
+        } catch (error: unknown) {
+            if (error && typeof error === 'object' && 'statusCode' in error) {
+                const apiError = error as { statusCode: number; body: unknown };
+                return res.status(apiError.statusCode).json(apiError.body);
+            }
+            throw error;
+        } finally {
+            await session.endSession();
         }
 
-        // Deduct balance
-        user.walletBalance -= unlockFee;
-        await user.save();
-
-        // Unlock formulation
-        formulation.isUnlocked = true;
-        formulation.unlockedAt = new Date();
-        await formulation.save();
-
-        res.json({
-            message: 'Formulation unlocked successfully',
-            newBalance: user.walletBalance,
-            formulation: {
-                _id: formulation._id,
-                ingredientsUsed: formulation.ingredientsUsed,
-                totalCost: formulation.totalCost,
-                costPerKg: formulation.costPerKg,
-                complianceColor: formulation.complianceColor,
-                actualNutrients: formulation.actualNutrients
-            }
+        return res.json({
+            message: alreadyUnlocked ? 'Formulation already unlocked' : 'Formulation unlocked successfully',
+            alreadyUnlocked,
+            ...(newBalance !== null ? { newBalance } : {}),
+            formulation: responsePayload
         });
 
     } catch (error) {
