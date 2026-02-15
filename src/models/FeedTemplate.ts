@@ -5,6 +5,7 @@ export interface IFeedTemplate extends Document {
     description: string;
     feedCategory: 'Catfish' | 'Poultry';
     poultryType?: 'Broiler' | 'Layer';
+    stage: string;
     ingredientNames: string[]; // Names of ingredients to pre-select
     isActive: boolean;
     createdAt: Date;
@@ -32,6 +33,12 @@ const FeedTemplateSchema = new Schema<IFeedTemplate>({
     poultryType: {
         type: String,
         enum: ['Broiler', 'Layer'],
+        index: true
+    },
+    stage: {
+        type: String,
+        trim: true,
+        default: 'Starter',
         index: true
     },
     ingredientNames: [{

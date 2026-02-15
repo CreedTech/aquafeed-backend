@@ -6,6 +6,7 @@ import {
     evaluateAlternativeOptions,
     getAlternativeCacheResult,
     getFormulationPricing,
+    getFormulationSummary,
     unlockFormulation,
     getFormulations
 } from './formulation.controller';
@@ -31,6 +32,7 @@ router.post('/preview-fix', previewFormulationFix);
 router.post('/alternatives/evaluate', evaluateAlternativeOptions);
 router.get('/alternatives/cache/:cacheKey', getAlternativeCacheResult);
 router.get('/unlock-fee', getFormulationPricing);
+router.get('/summary', getFormulationSummary);
 
 /**
  * @route   POST /api/v1/formulations/:id/unlock

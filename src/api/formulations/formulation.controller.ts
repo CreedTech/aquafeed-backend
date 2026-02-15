@@ -835,6 +835,161 @@ export const getFormulationPricing = async (_req: Request, res: Response) => {
     }
 };
 
+/**
+ * Get formulation summary for dashboard cards.
+ * GET /api/v1/formulations/summary
+ */
+export const getFormulationSummary = async (req: Request, res: Response) => {
+    try {
+        const userId = getAuthenticatedUserId(req);
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+        }
+
+        const recentLimit = Math.max(
+            1,
+            Math.min(20, Number.parseInt(String(req.query.recentLimit || '8'), 10) || 8)
+        );
+
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.json({
+                summary: {
+                    total: 0,
+                    unlocked: 0,
+                    locked: 0,
+                    compliant: 0,
+                    avgQualityMatch: 0,
+                    totalCost: 0,
+                    feedTypeCounts: { fish: 0, poultry: 0 }
+                },
+                recentMixes: []
+            });
+        }
+
+        const objectUserId = new mongoose.Types.ObjectId(userId);
+
+        const [summaryRows, feedTypeRows, recentFormulations] = await Promise.all([
+            Formulation.aggregate([
+                { $match: { userId: objectUserId } },
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        unlocked: {
+                            $sum: { $cond: [{ $eq: ['$isUnlocked', true] }, 1, 0] }
+                        },
+                        green: {
+                            $sum: { $cond: [{ $eq: ['$complianceColor', 'Green'] }, 1, 0] }
+                        },
+                        avgQualityMatch: { $avg: '$qualityMatchPercentage' },
+                        totalCost: { $sum: '$totalCost' }
+                    }
+                }
+            ]),
+            Formulation.aggregate([
+                { $match: { userId: objectUserId } },
+                {
+                    $lookup: {
+                        from: 'feedstandards',
+                        localField: 'standardUsed',
+                        foreignField: '_id',
+                        as: 'standardUsed'
+                    }
+                },
+                {
+                    $unwind: {
+                        path: '$standardUsed',
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            $cond: [
+                                { $eq: [{ $toLower: '$standardUsed.feedCategory' }, 'poultry'] },
+                                'poultry',
+                                'fish'
+                            ]
+                        },
+                        count: { $sum: 1 }
+                    }
+                }
+            ]),
+            Formulation.find({ userId })
+                .sort({ createdAt: -1 })
+                .limit(recentLimit)
+                .populate('standardUsed', 'name feedCategory fishType poultryType')
+                .select(
+                    '_id batchName complianceColor qualityMatchPercentage totalCost costPerKg isUnlocked createdAt standardUsed'
+                )
+                .lean()
+        ]);
+
+        const rawSummary = summaryRows[0] || {
+            total: 0,
+            unlocked: 0,
+            green: 0,
+            avgQualityMatch: 0,
+            totalCost: 0
+        };
+        const total = Number(rawSummary.total || 0);
+        const unlocked = Number(rawSummary.unlocked || 0);
+        const green = Number(rawSummary.green || 0);
+        const avgQualityMatch = Number(rawSummary.avgQualityMatch || 0);
+        const totalCost = Number(rawSummary.totalCost || 0);
+
+        const feedTypeCounts = feedTypeRows.reduce<Record<string, number>>((acc, row) => {
+            const type = row?._id;
+            if (type === 'fish' || type === 'poultry') {
+                acc[type] = Number(row.count || 0);
+            }
+            return acc;
+        }, { fish: 0, poultry: 0 });
+
+        const recentMixes = recentFormulations.map((formulation: any) => {
+            const standard = formulation.standardUsed || {};
+            const standardName = typeof standard.name === 'string' ? standard.name : '';
+
+            return {
+                _id: formulation._id,
+                batchName: formulation.batchName,
+                title: formulation.batchName || standardName || 'Feed Mix',
+                complianceColor: formulation.complianceColor,
+                qualityMatchPercentage: Number(formulation.qualityMatchPercentage || 0),
+                totalCost: Number(formulation.totalCost || 0),
+                costPerKg: Number(formulation.costPerKg || 0),
+                isUnlocked: formulation.isUnlocked === true,
+                createdAt: formulation.createdAt,
+                standardUsed: {
+                    name: standardName,
+                    feedCategory: standard.feedCategory,
+                    fishType: standard.fishType,
+                    poultryType: standard.poultryType
+                }
+            };
+        });
+
+        return res.json({
+            summary: {
+                total,
+                unlocked,
+                locked: Math.max(0, total - unlocked),
+                compliant: green,
+                avgQualityMatch: Number(avgQualityMatch.toFixed(2)),
+                totalCost: Number(totalCost.toFixed(2)),
+                feedTypeCounts
+            },
+            recentMixes
+        });
+    } catch (error) {
+        console.error('Error fetching formulation summary:', error);
+        return res.status(500).json({
+            error: 'Failed to fetch formulation summary',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
 type StrategySnapshot = {
     strategy: string;
     totalCost: number;
