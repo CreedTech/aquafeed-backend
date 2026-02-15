@@ -20,6 +20,19 @@ type ConfigurationRecord = {
     [key: string]: unknown;
 };
 
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const parseBooleanQuery = (value: unknown): boolean | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+    return undefined;
+};
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
  * Get all users with pagination and filtering
  */
@@ -623,12 +636,86 @@ export const updateConfiguration = async (req: Request, res: Response) => {
 /**
  * Admin: Get all feed templates
  */
-export const getAllTemplatesAdmin = async (_req: Request, res: Response) => {
+export const getAllTemplatesAdmin = async (req: Request, res: Response) => {
     try {
-        const templates = await FeedTemplate.find().sort({ name: 1 }).lean();
+        const { search, sortKey, sortDirection } = req.query;
+        const query: Record<string, unknown> = {};
+
+        if (
+            req.query.feedCategory &&
+            ['Catfish', 'Poultry'].includes(String(req.query.feedCategory))
+        ) {
+            query.feedCategory = String(req.query.feedCategory);
+        }
+
+        const active = parseBooleanQuery(req.query.active);
+        if (active !== undefined) {
+            query.isActive = active;
+        }
+
+        const normalizedSearch = String(search || '').trim();
+        if (normalizedSearch) {
+            const pattern = escapeRegex(normalizedSearch);
+            query.$or = [
+                { name: { $regex: pattern, $options: 'i' } },
+                { description: { $regex: pattern, $options: 'i' } },
+                { stage: { $regex: pattern, $options: 'i' } }
+            ];
+        }
+
+        const hasPagination = req.query.page !== undefined || req.query.limit !== undefined;
+        const page = clamp(parseInt(String(req.query.page || '1'), 10) || 1, 1, 100000);
+        const limit = clamp(parseInt(String(req.query.limit || '20'), 10) || 20, 1, 200);
+        const skip = (page - 1) * limit;
+
+        const sortFieldMap: Record<string, string> = {
+            name: 'name',
+            feedCategory: 'feedCategory',
+            stage: 'stage',
+            items: 'itemCount',
+            status: 'isActive',
+            createdAt: 'createdAt'
+        };
+        const resolvedSortField = sortFieldMap[String(sortKey || '')] || 'name';
+        const resolvedSortDirection = String(sortDirection || '').toLowerCase() === 'desc' ? -1 : 1;
+
+        const basePipeline: any[] = [
+            { $match: query },
+            {
+                $addFields: {
+                    itemCount: { $size: { $ifNull: ['$ingredientNames', []] } }
+                }
+            }
+        ];
+
+        const [templates, filteredTotal, summaryRows] = await Promise.all([
+            FeedTemplate.aggregate([
+                ...basePipeline,
+                { $sort: { [resolvedSortField]: resolvedSortDirection, name: 1 } },
+                ...(hasPagination ? [{ $skip: skip }, { $limit: limit }] : [])
+            ]),
+            FeedTemplate.countDocuments(query),
+            FeedTemplate.aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        active: {
+                            $sum: { $cond: [{ $eq: ['$isActive', true] }, 1, 0] }
+                        },
+                        fish: {
+                            $sum: { $cond: [{ $eq: ['$feedCategory', 'Catfish'] }, 1, 0] }
+                        },
+                        poultry: {
+                            $sum: { $cond: [{ $eq: ['$feedCategory', 'Poultry'] }, 1, 0] }
+                        }
+                    }
+                }
+            ])
+        ]);
 
         const uniqueIngredientNames = Array.from(new Set(
-            templates.flatMap((template) => template.ingredientNames || [])
+            templates.flatMap((template: any) => (template.ingredientNames as string[]) || [])
         ));
 
         const ingredients = await Ingredient.find({
@@ -638,7 +725,7 @@ export const getAllTemplatesAdmin = async (_req: Request, res: Response) => {
             ingredients.map((ingredient) => [ingredient.name, ingredient._id.toString()])
         );
 
-        const hydrated = templates.map((template) => {
+        const hydrated = templates.map((template: any) => {
             const totalWeight = 100;
             const ingredientCount = (template.ingredientNames || []).length || 1;
             const ratioPerIngredient = Number((100 / ingredientCount).toFixed(4));
@@ -648,17 +735,46 @@ export const getAllTemplatesAdmin = async (_req: Request, res: Response) => {
                 feedType: template.feedCategory === 'Poultry' ? 'poultry' : 'fish',
                 fishSubtype: template.feedCategory === 'Poultry' ? undefined : 'catfish',
                 totalWeight,
+                stage: template.stage || '',
                 items: (template.ingredientNames || [])
-                    .map((name) => ({
+                    .map((name: string) => ({
                         ingredientId: ingredientIdByName.get(name) || '',
                         ratio: ratioPerIngredient,
                         ingredientName: name
                     }))
-                    .filter((item) => item.ingredientId !== '')
+                    .filter((item: { ingredientId: string }) => item.ingredientId !== '')
             };
         });
 
-        res.json({ templates: hydrated });
+        const summary = summaryRows[0] || { total: 0, active: 0, fish: 0, poultry: 0 };
+        const payload: Record<string, unknown> = {
+            templates: hydrated,
+            count: hydrated.length,
+            filteredTotal,
+            summary: {
+                total: Number(summary.total || 0),
+                active: Number(summary.active || 0),
+                inactive: Math.max(0, Number(summary.total || 0) - Number(summary.active || 0)),
+                fish: Number(summary.fish || 0),
+                poultry: Number(summary.poultry || 0)
+            },
+            filterOptions: {
+                feedCategories: ['Catfish', 'Poultry']
+            }
+        };
+
+        if (hasPagination) {
+            payload.meta = {
+                page,
+                limit,
+                total: filteredTotal,
+                pages: Math.max(1, Math.ceil(filteredTotal / limit)),
+                hasNext: skip + hydrated.length < filteredTotal,
+                hasPrev: page > 1
+            };
+        }
+
+        res.json(payload);
     } catch (error) {
         console.error('Get All Templates Admin Error:', error);
         res.status(500).json({ error: 'Internal server error' });
