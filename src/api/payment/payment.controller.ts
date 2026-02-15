@@ -393,37 +393,21 @@ export const handleWebhook = async (req: Request, res: Response) => {
  * Route: GET /api/v1/payments/callback
  */
 export const paymentCallback = async (req: Request, res: Response) => {
-    const reference = typeof req.query.reference === 'string'
-        ? req.query.reference
-        : '';
-    const status = typeof req.query.status === 'string'
-        ? req.query.status
-        : '';
+    const deepLinkQuery = new URLSearchParams();
+    Object.entries(req.query).forEach(([key, value]) => {
+        if (typeof value === 'string' && value.length > 0) {
+            deepLinkQuery.set(key, value);
+            return;
+        }
+        if (Array.isArray(value) && typeof value[0] === 'string') {
+            deepLinkQuery.set(key, value[0]);
+        }
+    });
+    deepLinkQuery.set('source', 'paystack');
 
-    res.status(200).type('html').send(`
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Payment Return</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f7f7f8; color: #111827; }
-      .card { max-width: 520px; margin: 48px auto; background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
-      h1 { margin: 0 0 12px; font-size: 20px; }
-      p { margin: 8px 0; line-height: 1.5; }
-      code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Payment Return</h1>
-      <p>Your checkout flow is complete. Return to the AquaFeed app and tap <strong>Verify</strong> to credit your wallet.</p>
-      ${status ? `<p>Status: <code>${status}</code></p>` : ''}
-      ${reference ? `<p>Reference: <code>${reference}</code></p>` : ''}
-    </div>
-  </body>
-</html>`);
+    const deepLink = `aquafeed:///payment/callback?${deepLinkQuery.toString()}`;
+    res.setHeader('Cache-Control', 'no-store');
+    res.redirect(302, deepLink);
 };
 
 /**
