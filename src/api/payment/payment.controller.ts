@@ -27,6 +27,10 @@ const getReferenceFromRequest = (req: Request): string | null => {
     if (typeof rawReference === 'string' && rawReference.trim().length > 0) {
         return rawReference.trim();
     }
+    const rawTrxRef = req.query.trxref;
+    if (typeof rawTrxRef === 'string' && rawTrxRef.trim().length > 0) {
+        return rawTrxRef.trim();
+    }
     return null;
 };
 
@@ -55,6 +59,31 @@ const getConfiguredCallbackUrl = (): string | undefined => {
     }
 
     return undefined;
+};
+
+const toReasonCode = (value: string): string => value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+
+const buildAppPaymentDeepLink = (params: {
+    reference?: string;
+    status: 'success' | 'failed' | 'pending' | 'error';
+    reason?: string;
+}) => {
+    const query = new URLSearchParams();
+    query.set('status', params.status);
+    query.set('source', 'paystack');
+
+    if (params.reference) {
+        query.set('reference', params.reference);
+    }
+    if (params.reason) {
+        query.set('reason', params.reason);
+    }
+
+    return `aquafeed://payment/callback?${query.toString()}`;
 };
 
 type PaystackVerifyData = {
@@ -393,21 +422,93 @@ export const handleWebhook = async (req: Request, res: Response) => {
  * Route: GET /api/v1/payments/callback
  */
 export const paymentCallback = async (req: Request, res: Response) => {
-    const deepLinkQuery = new URLSearchParams();
-    Object.entries(req.query).forEach(([key, value]) => {
-        if (typeof value === 'string' && value.length > 0) {
-            deepLinkQuery.set(key, value);
+    const reference = getReferenceFromRequest(req);
+    const callbackStatus = typeof req.query.status === 'string'
+        ? req.query.status.toLowerCase()
+        : '';
+
+    if (!reference) {
+        res.redirect(302, buildAppPaymentDeepLink({
+            status: 'error',
+            reason: 'missing_reference'
+        }));
+        return;
+    }
+
+    if (!PAYSTACK_SECRET) {
+        res.redirect(302, buildAppPaymentDeepLink({
+            reference,
+            status: 'pending',
+            reason: 'paystack_not_configured'
+        }));
+        return;
+    }
+
+    try {
+        const response = await axios.get(
+            `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
+            {
+                headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` },
+            }
+        );
+
+        const verifyData = response.data?.data as PaystackVerifyData;
+        const metadataType = verifyData?.metadata?.type;
+        if (metadataType && metadataType !== 'wallet_deposit') {
+            res.redirect(302, buildAppPaymentDeepLink({
+                reference,
+                status: 'failed',
+                reason: 'unsupported_payment_type'
+            }));
             return;
         }
-        if (Array.isArray(value) && typeof value[0] === 'string') {
-            deepLinkQuery.set(key, value[0]);
-        }
-    });
-    deepLinkQuery.set('source', 'paystack');
 
-    const deepLink = `aquafeed://payment/callback?${deepLinkQuery.toString()}`;
-    res.setHeader('Cache-Control', 'no-store');
-    res.redirect(302, deepLink);
+        if (verifyData?.status === 'success') {
+            const creditResult = await creditWalletFromVerifiedPaystackData(verifyData);
+            res.redirect(302, buildAppPaymentDeepLink({
+                reference: creditResult.reference,
+                status: 'success',
+                reason: creditResult.alreadyProcessed ? 'already_processed' : 'verified'
+            }));
+            return;
+        }
+
+        if (verifyData?.status === 'failed' || callbackStatus === 'failed' || callbackStatus === 'cancelled' || callbackStatus === 'abandoned') {
+            res.redirect(302, buildAppPaymentDeepLink({
+                reference,
+                status: 'failed',
+                reason: 'paystack_failed'
+            }));
+            return;
+        }
+
+        res.redirect(302, buildAppPaymentDeepLink({
+            reference,
+            status: 'pending',
+            reason: verifyData?.status ? toReasonCode(verifyData.status) : 'verification_pending'
+        }));
+    } catch (error: unknown) {
+        if (error instanceof PaymentProcessingError) {
+            const reason = toReasonCode(error.message || 'processing_error');
+            const status: 'failed' | 'pending' = error.statusCode >= 400 && error.statusCode < 500
+                ? 'failed'
+                : 'pending';
+
+            res.redirect(302, buildAppPaymentDeepLink({
+                reference,
+                status,
+                reason
+            }));
+            return;
+        }
+
+        console.error('Paystack Callback Verify Error:', error);
+        res.redirect(302, buildAppPaymentDeepLink({
+            reference,
+            status: 'pending',
+            reason: 'verification_unavailable'
+        }));
+    }
 };
 
 /**
