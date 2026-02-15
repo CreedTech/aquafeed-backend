@@ -19,7 +19,7 @@ export interface IConstraints {
     min_inclusion?: number;  // Minimum % in formulation
 }
 
-export type IngredientCategory = 'CARBOHYDRATE' | 'PROTEIN' | 'FIBER' | 'MINERALS' | 'OTHER';
+export type IngredientCategory = string;
 
 export interface IIngredient extends Document {
     name: string;
@@ -71,7 +71,8 @@ const IngredientSchema = new Schema<IIngredient>({
     }],
     category: {
         type: String,
-        enum: ['CARBOHYDRATE', 'PROTEIN', 'FIBER', 'MINERALS', 'OTHER'],
+        trim: true,
+        uppercase: true,
         required: true,
         index: true
     },
