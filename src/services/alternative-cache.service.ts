@@ -1,12 +1,7 @@
 import crypto from 'crypto';
-
-interface CacheEntry<T> {
-    value: T;
-    expiresAt: number;
-}
+import AlternativeCache from '../models/AlternativeCache';
 
 class AlternativeCacheService {
-    private cache = new Map<string, CacheEntry<unknown>>();
     private readonly ttlMs = 1000 * 60 * 15; // 15 minutes
 
     createKey(payload: unknown): string {
@@ -17,25 +12,42 @@ class AlternativeCacheService {
         return `alt:${digest}`;
     }
 
-    get<T>(key: string): T | null {
-        const cached = this.cache.get(key);
-        if (!cached) return null;
-        if (Date.now() > cached.expiresAt) {
-            this.cache.delete(key);
+    async get<T>(key: string): Promise<T | null> {
+        const now = new Date();
+        const cached = await AlternativeCache.findOne({
+            key,
+            expiresAt: { $gt: now }
+        }).lean();
+
+        if (!cached) {
             return null;
         }
-        return cached.value as T;
+
+        return cached.payload as T;
     }
 
-    set<T>(key: string, value: T, ttlMs?: number): void {
-        this.cache.set(key, {
-            value,
-            expiresAt: Date.now() + (ttlMs || this.ttlMs)
+    async set<T>(key: string, value: T, ttlMs?: number): Promise<void> {
+        const effectiveTtl = ttlMs || this.ttlMs;
+        await AlternativeCache.findOneAndUpdate(
+            { key },
+            {
+                key,
+                payload: value,
+                expiresAt: new Date(Date.now() + effectiveTtl)
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+    }
+
+    async clear(prefix?: string): Promise<void> {
+        if (!prefix) {
+            await AlternativeCache.deleteMany({});
+            return;
+        }
+
+        await AlternativeCache.deleteMany({
+            key: { $regex: `^${prefix}` }
         });
-    }
-
-    clear(): void {
-        this.cache.clear();
     }
 }
 
