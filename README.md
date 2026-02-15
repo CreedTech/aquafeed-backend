@@ -110,7 +110,7 @@ Once running, access Swagger docs at:
 
 ## Project Structure
 
-```
+``` bash
 backend/
 ├── src/
 │   ├── api/              # API routes & controllers
