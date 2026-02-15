@@ -1,19 +1,30 @@
 import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-// import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import connectDatabase from './config/database';
+import { apiLimiter } from './middleware/rate-limit.middleware';
 
 // Load environment variables
 dotenv.config();
 
 const app: Express = express();
 const PORT = process.env.PORT || 5000;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+
+if (!SESSION_SECRET) {
+    throw new Error('SESSION_SECRET is required');
+}
 
 // Add Morgan Logger (dev mode)
 import morgan from 'morgan';
 app.use(morgan('dev'));
+app.disable('x-powered-by');
+
+if (process.env.NODE_ENV === 'production') {
+    // Ensures secure cookies + correct IP extraction for rate limiting behind proxies.
+    app.set('trust proxy', 1);
+}
 
 // ======================
 // Middleware
@@ -94,7 +105,7 @@ import session from 'express-session';
 import MongoStore from 'connect-mongo';
 
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'supersecret',
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
@@ -110,14 +121,6 @@ app.use(session({
     }
 }));
 
-// Rate limiting
-// const limiter = rateLimit({
-//     windowMs: 15 * 60 * 1000, // 15 minutes
-//     max: 100, // Limit each IP to 100 requests per windowMs
-//     message: 'Too many requests from this IP, please try again later.'
-// });
-// app.use('/api/', limiter);
-
 // Import routes
 import ingredientRoutes from './api/ingredients/ingredient.routes';
 import standardRoutes from './api/standards/standard.routes';
@@ -129,7 +132,6 @@ import batchRoutes from './api/batches/batch.routes';
 import adminRoutes from './api/admin/admin.routes';
 import paymentRoutes from './api/payment/payment.routes';
 import templateRoutes from './api/formulations/template.routes';
-import { clerkAuth } from './middleware/clerk.middleware';
 import { openApiSpec } from './config/swagger';
 import scalarHtml from './config/scalarHtml';
 
@@ -172,8 +174,7 @@ app.get('/api/v1', (_req: Request, res: Response) => {
     });
 });
 
-// API Routes - Apply Clerk auth middleware for JWT verification
-app.use('/api/v1', clerkAuth);
+app.use('/api/v1', apiLimiter);
 
 app.use('/api/v1/ingredients', ingredientRoutes);
 app.use('/api/v1/standards', standardRoutes);
