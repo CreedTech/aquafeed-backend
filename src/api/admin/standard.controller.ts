@@ -49,22 +49,106 @@ const withCanonicalFields = <T extends { feedCategory: string; fishType?: string
     poultryType: standard.feedCategory.toLowerCase() === 'poultry' ? standard.poultryType : undefined
 });
 
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const parseBooleanQuery = (value: unknown): boolean | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+    return undefined;
+};
+
+const sortFieldMap: Record<string, string> = {
+    name: 'name',
+    feedType: 'feedCategory',
+    stage: 'stage',
+    protein: 'targetNutrients.protein.min',
+    status: 'isActive',
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt'
+};
+
+type SortSpec = Record<string, 1 | -1>;
+
+const normalizeSortDirection = (raw: unknown): 1 | -1 => {
+    const normalized = String(raw || '').toLowerCase();
+    return normalized === 'desc' ? -1 : 1;
+};
+
+const getSort = (sortKey: unknown, sortDirection: unknown) => {
+    const field = sortFieldMap[String(sortKey || '')] || 'feedCategory';
+    const dir = normalizeSortDirection(sortDirection);
+    return { [field]: dir, stage: 1, name: 1 } as SortSpec;
+};
+
 export const getAllStandardsAdmin = async (req: Request, res: Response) => {
     try {
-        const { feedType, stage, active } = req.query;
+        const { feedType, stage, search } = req.query;
 
         const query: Record<string, unknown> = {};
-        if (stage) query.stage = String(stage);
-        if (active !== undefined) query.isActive = active === 'true';
+        if (stage) query.stage = { $regex: `^${escapeRegex(String(stage))}$`, $options: 'i' };
+        const active = parseBooleanQuery(req.query.active);
+        if (active !== undefined) query.isActive = active;
         if (feedType === 'fish') query.feedCategory = 'Catfish';
         if (feedType === 'poultry') query.feedCategory = 'Poultry';
+        if (search) {
+            const pattern = escapeRegex(String(search).trim());
+            if (pattern) {
+                query.$or = [
+                    { name: { $regex: pattern, $options: 'i' } },
+                    { stage: { $regex: pattern, $options: 'i' } },
+                    { brand: { $regex: pattern, $options: 'i' } }
+                ];
+            }
+        }
 
-        const standards = await FeedStandard.find(query).sort({ feedCategory: 1, stage: 1, name: 1 }).lean();
+        const hasPagination = req.query.page !== undefined || req.query.limit !== undefined;
+        const page = clamp(parseInt(String(req.query.page || '1'), 10) || 1, 1, 100000);
+        const limit = clamp(parseInt(String(req.query.limit || '20'), 10) || 20, 1, 200);
+        const skip = (page - 1) * limit;
+        const sort = getSort(req.query.sortKey, req.query.sortDirection);
 
-        res.json({
+        const [standards, filteredTotal, total, activeCount, fishCount, poultryCount] = await Promise.all([
+            FeedStandard.find(query)
+                .sort(sort)
+                .skip(hasPagination ? skip : 0)
+                .limit(hasPagination ? limit : 0)
+                .lean(),
+            FeedStandard.countDocuments(query),
+            FeedStandard.countDocuments({}),
+            FeedStandard.countDocuments({ isActive: true }),
+            FeedStandard.countDocuments({ feedCategory: 'Catfish' }),
+            FeedStandard.countDocuments({ feedCategory: 'Poultry' })
+        ]);
+
+        const payload: Record<string, unknown> = {
             count: standards.length,
-            standards: standards.map((standard) => withCanonicalFields(standard))
-        });
+            filteredTotal,
+            standards: standards.map((standard) => withCanonicalFields(standard)),
+            summary: {
+                total,
+                active: activeCount,
+                fish: fishCount,
+                poultry: poultryCount
+            }
+        };
+
+        if (hasPagination) {
+            payload.meta = {
+                page,
+                limit,
+                total: filteredTotal,
+                pages: Math.max(1, Math.ceil(filteredTotal / limit)),
+                hasNext: skip + standards.length < filteredTotal,
+                hasPrev: page > 1
+            };
+        }
+
+        res.json(payload);
     } catch (error) {
         console.error('Get standards admin error:', error);
         res.status(500).json({ error: 'Failed to fetch standards' });
