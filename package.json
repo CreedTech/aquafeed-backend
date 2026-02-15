@@ -9,9 +9,12 @@
     "build": "tsc",
     "start": "node dist/app.js",
     "seed": "ts-node src/scripts/seedIngredients.ts",
+    "seed:categories": "ts-node src/scripts/seedCategories.ts",
     "seed:standards": "ts-node src/scripts/seedFeedStandards.ts",
     "seed:configs": "ts-node src/scripts/seedConfigurations.ts",
-    "seed:all": "npm run seed && npm run seed:standards && npm run seed:configs",
+    "seed:templates": "ts-node src/scripts/seedTemplates.ts",
+    "seed:alternatives": "ts-node src/scripts/seedAlternativeRules.ts",
+    "seed:all": "npm run seed && npm run seed:categories && npm run seed:standards && npm run seed:configs && npm run seed:templates && npm run seed:alternatives",
     "create-admin": "ts-node src/scripts/createAdmin.ts",
     "lint": "eslint src/**/*.ts",
     "test": "jest"
@@ -25,13 +28,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@clerk/backend": "^2.29.0",
-    "@clerk/express": "^1.7.60",
     "@scalar/express-api-reference": "^0.8.28",
     "@types/tough-cookie": "^4.0.5",
-    "axios": "^1.13.2",
+    "axios": "^1.13.5",
     "axios-cookiejar-support": "^6.0.5",
-    "bcrypt": "^5.1.1",
+    "bcrypt": "^6.0.0",
     "cloudinary": "^2.5.1",
     "connect-mongo": "^6.0.0",
     "connect-redis": "^7.1.1",
@@ -51,6 +52,13 @@
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "tough-cookie": "^6.0.0"
+  },
+  "overrides": {
+    "axios": "^1.13.5",
+    "diff": "^5.2.0",
+    "fast-xml-parser": "^5.3.4",
+    "qs": "^6.14.2",
+    "tar": "^7.5.8"
   },
   "devDependencies": {
     "@types/bcrypt": "^5.0.2",

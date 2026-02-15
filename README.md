@@ -55,6 +55,7 @@ REDIS_URL=
 
 # Session
 SESSION_SECRET=
+OTP_PEPPER=
 
 # Email
 POSTMARK_API_KEY=
@@ -66,6 +67,14 @@ PAYSTACK_CALLBACK_URL=
 
 # App URLs
 BACKEND_URL=
+
+# Rate limiting
+RATE_LIMIT_WINDOW_MS=
+RATE_LIMIT_MAX=
+OTP_REQUEST_WINDOW_MS=
+OTP_REQUEST_MAX=
+OTP_VERIFY_WINDOW_MS=
+OTP_VERIFY_MAX=
 ```
 
 ## Database Setup
@@ -87,6 +96,28 @@ npm run seed
 ```
 
 This imports 58 Nigerian fish feed ingredients with complete nutritional data.
+
+### 3. Optional Seed Scripts
+
+```bash
+# Categories (feed_type, fish_type, poultry_type, stage)
+npm run seed:categories
+
+# Feed standards
+npm run seed:standards
+
+# Solver and financial configs
+npm run seed:configs
+
+# Quick mix templates
+npm run seed:templates
+
+# Alternative ingredient rules + Ingredient.alternatives links
+npm run seed:alternatives
+
+# Full bootstrap (runs all above in order)
+npm run seed:all
+```
 
 ## Running the Server
 
