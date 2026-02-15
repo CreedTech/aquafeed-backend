@@ -1,14 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import User from '../models/User';
 
-// Extend Session data interface
-declare module 'express-session' {
-    interface SessionData {
-        userId: string;
-        isAdmin: boolean;
-    }
-}
-
 export const requireAuth = (req: Request, res: Response, next: NextFunction) => {
     const userId = req.userId || req.session?.userId;
     if (!userId) {
