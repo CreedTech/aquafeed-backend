@@ -43,7 +43,6 @@ export const requestOtp = async (req: Request, res: Response) => {
         // Generate and store OTP
         const otp = generateOTP();
         await storeOTP(email, otp);
-        console.log(`[OTP] Generated for ${email}: ${otp}`);
 
         // Send OTP via email
         try {
