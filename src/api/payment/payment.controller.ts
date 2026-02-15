@@ -405,7 +405,7 @@ export const paymentCallback = async (req: Request, res: Response) => {
     });
     deepLinkQuery.set('source', 'paystack');
 
-    const deepLink = `aquafeed:///payment/callback?${deepLinkQuery.toString()}`;
+    const deepLink = `aquafeed://payment/callback?${deepLinkQuery.toString()}`;
     res.setHeader('Cache-Control', 'no-store');
     res.redirect(302, deepLink);
 };
