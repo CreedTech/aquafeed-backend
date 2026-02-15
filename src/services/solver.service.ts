@@ -242,7 +242,7 @@ export class FeedOptimizationService {
             result = solver.Solve(fallbackModel);
 
             if (!result.feasible) {
-                const infeasibility = this.analyzeInfeasibility(
+                const infeasibility = await this.analyzeInfeasibility(
                     ingredients,
                     nutritionalTarget,
                     targetWeightKg,
@@ -315,7 +315,7 @@ export class FeedOptimizationService {
         });
     }
 
-    private async calculateActualNutrients(quantities: Record<string, number>, ingredients: IngredientForSolver[], totalWeight: number): Promise<INutrients> {
+    async calculateActualNutrients(quantities: Record<string, number>, ingredients: IngredientForSolver[], totalWeight: number): Promise<INutrients> {
         const configs = await configService.getAll();
         const m1 = configs.energy_protein_mult || 4;
         const m2 = configs.energy_carb_mult || 4;
@@ -418,7 +418,30 @@ export class FeedOptimizationService {
         target: NutritionalTarget,
         targetWeightKg: number,
         isCatfish: boolean
-    ): InfeasibilityAnalysis {
+    ): Promise<InfeasibilityAnalysis> {
+        return this.buildInfeasibilityAnalysis(
+            ingredients,
+            target,
+            targetWeightKg,
+            isCatfish
+        );
+    }
+
+    private async buildInfeasibilityAnalysis(
+        ingredients: IngredientForSolver[],
+        target: NutritionalTarget,
+        targetWeightKg: number,
+        isCatfish: boolean
+    ): Promise<InfeasibilityAnalysis> {
+        const configs = await configService.getAll();
+        const allowRelaxations = configs.suggestion_allow_relaxations !== false;
+        const configuredStep = Number(configs.suggestion_max_relaxation_step_pct ?? 5);
+        const maxRelaxationStep = Number.isFinite(configuredStep) && configuredStep > 0
+            ? configuredStep
+            : 5;
+        const rankStrategy = String(configs.suggestion_rank_strategy || 'balanced')
+            .toLowerCase();
+
         const violations: ConstraintViolation[] = [];
         const suggestions: string[] = [];
         const unitByNutrient: Record<string, '%' | 'kcal/kg'> = {
@@ -570,7 +593,9 @@ export class FeedOptimizationService {
         // Recommended actions (for one-tap buttons in client apps)
         const recommendedActions: RecommendedAction[] = [];
         const nutrientMinViolation = violations.find(v => v.type === 'nutrient_min');
-        if (nutrientMinViolation) {
+        if (nutrientMinViolation && allowRelaxations) {
+            const suggestedDelta = Math.max(0.2, nutrientMinViolation.gap * 0.35);
+            const boundedDelta = Math.min(maxRelaxationStep, suggestedDelta);
             recommendedActions.push({
                 actionType: 'APPLY_SUGGESTED_RELAXATION',
                 label: 'Apply suggested relaxation',
@@ -578,15 +603,16 @@ export class FeedOptimizationService {
                 patch: {
                     nutrient: nutrientMinViolation.nutrient,
                     operation: 'relax_min',
-                    delta: Number((Math.max(0.2, nutrientMinViolation.gap * 0.35)).toFixed(3))
+                    delta: Number(boundedDelta.toFixed(3))
                 },
-                estimatedCostDelta: -2.5,
-                estimatedComplianceDelta: 8.0,
-                confidence: 0.78
+                estimatedCostDelta: Number((-Math.min(8, boundedDelta * 1.4)).toFixed(1)),
+                estimatedComplianceDelta: Number(Math.min(18, nutrientMinViolation.gap * 4 + 2).toFixed(1)),
+                confidence: Number(Math.max(0.55, Math.min(0.9, 0.65 + (boundedDelta / 20))).toFixed(2))
             });
         }
 
         if (ingredients.some(i => (i.alternatives || []).length > 0)) {
+            const alternativesCount = ingredients.filter(i => (i.alternatives || []).length > 0).length;
             recommendedActions.push({
                 actionType: 'TRY_ALTERNATIVE_INGREDIENTS',
                 label: 'Try alternative ingredients',
@@ -597,13 +623,14 @@ export class FeedOptimizationService {
                         .filter(i => (i.alternatives || []).length > 0)
                         .map(i => i.id)
                 },
-                estimatedCostDelta: -4.2,
-                estimatedComplianceDelta: 6.5,
-                confidence: 0.72
+                estimatedCostDelta: Number((-Math.min(12, Math.max(2, alternativesCount * 1.8))).toFixed(1)),
+                estimatedComplianceDelta: Number(Math.min(14, 3 + alternativesCount * 1.9).toFixed(1)),
+                confidence: Number(Math.max(0.58, Math.min(0.88, 0.62 + (alternativesCount * 0.04))).toFixed(2))
             });
         }
 
-        if (tightLimits.length > 0) {
+        if (tightLimits.length > 0 && allowRelaxations) {
+            const deltaPercent = Math.min(5, maxRelaxationStep);
             recommendedActions.push({
                 actionType: 'EDIT_INGREDIENT_LIMITS',
                 label: 'Edit ingredient limits',
@@ -611,14 +638,15 @@ export class FeedOptimizationService {
                 patch: {
                     operation: 'relax_ingredient_max',
                     ingredientIds: tightLimits.map(i => i.id),
-                    deltaPercent: 5
+                    deltaPercent
                 },
-                estimatedCostDelta: 1.2,
-                estimatedComplianceDelta: 10.5,
-                confidence: 0.74
+                estimatedCostDelta: Number(Math.min(4, tightLimits.length * 0.9).toFixed(1)),
+                estimatedComplianceDelta: Number(Math.min(20, 6 + tightLimits.length * 2.4).toFixed(1)),
+                confidence: Number(Math.max(0.56, Math.min(0.9, 0.66 + (tightLimits.length * 0.03))).toFixed(2))
             });
         }
 
+        const targetAdjustmentStep = Math.min(2, maxRelaxationStep);
         recommendedActions.push({
             actionType: 'ADJUST_QUANTITY_OR_TARGETS',
             label: 'Adjust quantity/targets',
@@ -626,11 +654,33 @@ export class FeedOptimizationService {
             patch: {
                 operation: 'adjust_target',
                 targetWeightKg: Math.max(10, Number((targetWeightKg * 0.9).toFixed(1))),
-                nutrientDeltaPct: 2
+                nutrientDeltaPct: Number(targetAdjustmentStep.toFixed(2))
             },
-            estimatedCostDelta: -10,
-            estimatedComplianceDelta: 4,
+            estimatedCostDelta: Number((-Math.min(15, Math.max(3, targetWeightKg * 0.01))).toFixed(1)),
+            estimatedComplianceDelta: Number(Math.min(8, 2 + targetAdjustmentStep * 1.5).toFixed(1)),
             confidence: 0.65
+        });
+
+        const rankedActions = recommendedActions.slice().sort((a, b) => {
+            if (rankStrategy === 'cost_first') {
+                if (a.estimatedCostDelta !== b.estimatedCostDelta) {
+                    return a.estimatedCostDelta - b.estimatedCostDelta;
+                }
+                return b.estimatedComplianceDelta - a.estimatedComplianceDelta;
+            }
+            if (rankStrategy === 'compliance_first') {
+                if (a.estimatedComplianceDelta !== b.estimatedComplianceDelta) {
+                    return b.estimatedComplianceDelta - a.estimatedComplianceDelta;
+                }
+                return a.estimatedCostDelta - b.estimatedCostDelta;
+            }
+
+            const score = (item: RecommendedAction) => (
+                (item.estimatedComplianceDelta * 0.6)
+                + ((-item.estimatedCostDelta) * 0.3)
+                + (item.confidence * 10 * 0.1)
+            );
+            return score(b) - score(a);
         });
 
         // Default fallback
@@ -642,7 +692,7 @@ export class FeedOptimizationService {
         return {
             summary: suggestions.join(' '),
             violations,
-            recommendedActions
+            recommendedActions: rankedActions
         };
     }
 }
