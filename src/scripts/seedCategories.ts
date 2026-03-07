@@ -33,6 +33,10 @@ async function seedCategories() {
             { name: 'STARTER', displayName: 'Starter', type: 'stage' as const, sortOrder: 5, description: 'Poultry early stage' },
             { name: 'BROILER_FINISHER', displayName: 'Broiler Finisher', type: 'stage' as const, sortOrder: 6, description: 'Poultry finishing stage' },
             { name: 'LAYER_PROD', displayName: 'Layer Production', type: 'stage' as const, sortOrder: 7, description: 'Poultry egg production' },
+            { name: 'PRE_LAY', displayName: 'Pre-Lay', type: 'stage' as const, sortOrder: 8, description: 'Poultry transition to laying' },
+            { name: 'PHASE_1', displayName: 'Phase 1', type: 'stage' as const, sortOrder: 9, description: 'Layer peak production phase' },
+            { name: 'PHASE_2', displayName: 'Phase 2', type: 'stage' as const, sortOrder: 10, description: 'Layer late production phase' },
+            { name: 'PHASE_3', displayName: 'Phase 3', type: 'stage' as const, sortOrder: 11, description: 'Layer mature production phase' },
         ];
 
         // Default poultry subtypes

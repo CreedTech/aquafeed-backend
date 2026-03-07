@@ -25,6 +25,7 @@ export interface IIngredient extends Document {
     name: string;
     tags: string[]; // ['ANIMAL_PROTEIN', 'PLANT_PROTEIN', 'DCP']
     category: IngredientCategory;
+    aliases: string[];
     nutrients: INutrients;
     constraints: IConstraints;
     defaultPrice: number | null;  // Benchmark market price (₦/kg)
@@ -33,6 +34,8 @@ export interface IIngredient extends Document {
     isAutoCalculated: boolean;    // True for Vitamin C (400mg/kg auto-calculated)
     autoCalcRatio: number | null; // Ratio for auto-calculation (e.g., 0.0004 for 400mg/kg)
     alternatives: mongoose.Types.ObjectId[];  // Alternative ingredients
+    dataQuality: 'verified' | 'flagged';
+    qualityNotes: string[];
     isActive: boolean;
     createdAt: Date;
     updatedAt: Date;
@@ -76,6 +79,11 @@ const IngredientSchema = new Schema<IIngredient>({
         required: true,
         index: true
     },
+    aliases: [{
+        type: String,
+        trim: true,
+        uppercase: true
+    }],
     nutrients: {
         type: NutrientsSchema,
         required: true
@@ -111,6 +119,16 @@ const IngredientSchema = new Schema<IIngredient>({
         type: Schema.Types.ObjectId,
         ref: 'Ingredient'
     }],
+    dataQuality: {
+        type: String,
+        enum: ['verified', 'flagged'],
+        default: 'verified',
+        index: true
+    },
+    qualityNotes: [{
+        type: String,
+        trim: true
+    }],
     isActive: {
         type: Boolean,
         default: true,
@@ -123,5 +141,6 @@ const IngredientSchema = new Schema<IIngredient>({
 // Indexes for performance
 IngredientSchema.index({ name: 'text' });
 IngredientSchema.index({ category: 1, isActive: 1 });
+IngredientSchema.index({ aliases: 1 });
 
 export default mongoose.model<IIngredient>('Ingredient', IngredientSchema);

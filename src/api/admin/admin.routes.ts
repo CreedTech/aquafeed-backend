@@ -5,6 +5,7 @@ import * as ingredientController from './master-ingredient.controller';
 import * as categoryController from './category.controller';
 import * as standardController from './standard.controller';
 import * as alternativeRuleController from './alternative-rule.controller';
+import * as dataImportController from './data-import.controller';
 
 const router = Router();
 
@@ -42,6 +43,13 @@ router.get('/alternatives/rules', alternativeRuleController.getAlternativeRulesA
 router.post('/alternatives/rules', alternativeRuleController.createAlternativeRuleAdmin);
 router.put('/alternatives/rules/:id', alternativeRuleController.updateAlternativeRuleAdmin);
 router.delete('/alternatives/rules/:id', alternativeRuleController.deleteAlternativeRuleAdmin);
+
+// Data Imports (Poultry workbook)
+router.post('/imports/poultry-workbook/preview', dataImportController.previewPoultryWorkbookImport);
+router.post('/imports/poultry-workbook/apply', dataImportController.applyPoultryWorkbookImport);
+router.post('/imports/poultry-workbook/rollback/:runId', dataImportController.rollbackPoultryWorkbookImport);
+router.get('/imports/poultry-workbook/:runId', dataImportController.getPoultryWorkbookImportRun);
+router.get('/imports/poultry-workbook', dataImportController.getRecentPoultryWorkbookImports);
 
 // Formulations (Read-only for admin - but allowed to delete)
 router.get('/formulations', adminController.getAllFormulations);

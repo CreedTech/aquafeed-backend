@@ -23,6 +23,13 @@ export interface IFeedStandard extends Document {
     brand: string;
     feedCategory: 'Catfish' | 'Poultry';
     poultryType?: 'Broiler' | 'Layer';
+    stageCode?: string;
+    ageGuidance?: string;
+    sourceMeta?: {
+        workbook: string;
+        sheet: string;
+        version: string;
+    };
     pelletSize: string;  // 2mm, 3mm, 4.5mm, etc.
     fishType?: string;    // Dynamic from Categories (Conditional for Catfish)
     stage: string;       // Dynamic from Categories
@@ -76,6 +83,21 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
         enum: ['Broiler', 'Layer'],
         index: true
     },
+    stageCode: {
+        type: String,
+        trim: true,
+        uppercase: true,
+        index: true
+    },
+    ageGuidance: {
+        type: String,
+        trim: true
+    },
+    sourceMeta: {
+        workbook: { type: String, trim: true },
+        sheet: { type: String, trim: true },
+        version: { type: String, trim: true }
+    },
     pelletSize: {
         type: String,
         required: true
@@ -114,5 +136,6 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
 // Update index prefix for fishType/stage
 FeedStandardSchema.index({ feedCategory: 1, fishType: 1, stage: 1, isActive: 1 });
 FeedStandardSchema.index({ feedCategory: 1, poultryType: 1, stage: 1, isActive: 1 });
+FeedStandardSchema.index({ stageCode: 1, isActive: 1 });
 
 export default mongoose.model<IFeedStandard>('FeedStandard', FeedStandardSchema);
