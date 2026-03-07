@@ -20,6 +20,7 @@ const sortFieldMap: Record<string, string> = {
     category: 'category',
     price: 'defaultPrice',
     protein: 'nutrients.protein',
+    dataQuality: 'dataQuality',
     status: 'isActive',
     createdAt: 'createdAt',
     updatedAt: 'updatedAt'
@@ -165,16 +166,21 @@ export const getAllIngredients = async (req: Request, res: Response) => {
     try {
         const query: Record<string, unknown> = {};
         const category = normalizeCategory(req.query.category);
+        const dataQuality = req.query.dataQuality ? String(req.query.dataQuality).trim().toLowerCase() : '';
         const active = parseBooleanQuery(req.query.active);
         const search = req.query.search ? String(req.query.search).trim() : '';
 
         if (category) query.category = category;
+        if (dataQuality && ['verified', 'flagged'].includes(dataQuality)) {
+            query.dataQuality = dataQuality;
+        }
         if (active !== undefined) query.isActive = active;
         if (search) {
             const pattern = escapeRegex(search);
             query.$or = [
                 { name: { $regex: pattern, $options: 'i' } },
-                { category: { $regex: pattern, $options: 'i' } }
+                { category: { $regex: pattern, $options: 'i' } },
+                { aliases: { $regex: pattern, $options: 'i' } }
             ];
         }
 

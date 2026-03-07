@@ -7,7 +7,7 @@ import Ingredient from '../../models/Ingredient';
  */
 export const getIngredients = async (req: Request, res: Response) => {
     try {
-        const { category, search, active = 'true' } = req.query;
+        const { category, search, active = 'true', dataQuality } = req.query;
 
         const query: any = {};
 
@@ -20,7 +20,14 @@ export const getIngredients = async (req: Request, res: Response) => {
         }
 
         if (search) {
-            query.name = { $regex: search, $options: 'i' };
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { aliases: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        if (dataQuality && ['verified', 'flagged'].includes(String(dataQuality))) {
+            query.dataQuality = String(dataQuality);
         }
 
         const ingredients = await Ingredient.find(query)

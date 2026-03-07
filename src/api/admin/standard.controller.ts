@@ -12,6 +12,13 @@ type StandardPayload = {
     fishType?: string;
     poultryType?: 'Broiler' | 'Layer';
     stage?: string;
+    stageCode?: string;
+    ageGuidance?: string;
+    sourceMeta?: {
+        workbook?: string;
+        sheet?: string;
+        version?: string;
+    };
     pelletSize?: string;
     targetNutrients?: Record<string, { min?: number; max?: number }>;
     tolerance?: number;
@@ -34,6 +41,9 @@ const normalizeStandardPayload = (payload: StandardPayload) => {
             ? { poultryType: payload.poultryType }
             : { fishType: payload.fishSubtype || payload.fishType || 'catfish' }),
         ...(payload.stage !== undefined ? { stage: payload.stage } : {}),
+        ...(payload.stageCode !== undefined ? { stageCode: payload.stageCode } : {}),
+        ...(payload.ageGuidance !== undefined ? { ageGuidance: payload.ageGuidance } : {}),
+        ...(payload.sourceMeta !== undefined ? { sourceMeta: payload.sourceMeta } : {}),
         ...(payload.pelletSize !== undefined ? { pelletSize: payload.pelletSize } : {}),
         ...(payload.targetNutrients !== undefined ? { targetNutrients: payload.targetNutrients } : {}),
         ...(payload.tolerance !== undefined ? { tolerance: payload.tolerance } : {}),
@@ -66,6 +76,7 @@ const sortFieldMap: Record<string, string> = {
     name: 'name',
     feedType: 'feedCategory',
     stage: 'stage',
+    stageCode: 'stageCode',
     protein: 'targetNutrients.protein.min',
     status: 'isActive',
     createdAt: 'createdAt',
