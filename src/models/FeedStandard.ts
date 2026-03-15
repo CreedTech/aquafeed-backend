@@ -29,6 +29,7 @@ export interface IFeedStandard extends Document {
         workbook: string;
         sheet: string;
         version: string;
+        inheritedFields?: string[];
     };
     pelletSize: string;  // 2mm, 3mm, 4.5mm, etc.
     fishType?: string;    // Dynamic from Categories (Conditional for Catfish)
@@ -96,7 +97,8 @@ const FeedStandardSchema = new Schema<IFeedStandard>({
     sourceMeta: {
         workbook: { type: String, trim: true },
         sheet: { type: String, trim: true },
-        version: { type: String, trim: true }
+        version: { type: String, trim: true },
+        inheritedFields: [{ type: String, trim: true }]
     },
     pelletSize: {
         type: String,

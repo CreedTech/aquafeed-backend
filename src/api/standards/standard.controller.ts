@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import FeedStandard from '../../models/FeedStandard';
+import { resolveCanonicalStageCode } from '../../utils/stage-code.util';
 
 /**
  * Get all feed standards
@@ -27,7 +28,16 @@ export const getStandards = async (req: Request, res: Response) => {
         }
 
         if (stage) {
-            query.stage = { $regex: `^${String(stage)}$`, $options: 'i' };
+            const rawStage = String(stage).trim();
+            const normalizedStageCode = rawStage.toUpperCase();
+            const resolvedStageCode = resolveCanonicalStageCode(normalizedStageCode, {
+                feedType: feedType === 'poultry' ? 'poultry' : 'fish'
+            });
+            query.$or = [
+                { stage: { $regex: `^${rawStage}$`, $options: 'i' } },
+                { stageCode: normalizedStageCode },
+                ...(resolvedStageCode !== normalizedStageCode ? [{ stageCode: resolvedStageCode }] : [])
+            ];
         }
 
         if (brand) {

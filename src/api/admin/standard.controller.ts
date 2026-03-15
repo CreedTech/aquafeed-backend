@@ -18,6 +18,7 @@ type StandardPayload = {
         workbook?: string;
         sheet?: string;
         version?: string;
+        inheritedFields?: string[];
     };
     pelletSize?: string;
     targetNutrients?: Record<string, { min?: number; max?: number }>;
