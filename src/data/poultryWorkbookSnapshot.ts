@@ -4,13 +4,14 @@ export type WorkbookNutrientRange = { min: number; max: number };
 export type WorkbookStandard = {
   stageCode: string;
   name: string;
-  feedCategory: 'Poultry';
-  poultryType: 'Broiler' | 'Layer';
+  feedCategory: 'Poultry' | 'Catfish';
+  poultryType?: 'Broiler' | 'Layer';
+  fishType?: string;
   stage: string;
-  ageGuidance: string;
+  ageGuidance?: string;
   pelletSize: string;
   brand: string;
-  sourceSheet: 'Poultry' | 'Sheet2';
+  sourceSheet: 'Catfish' | 'Poultry' | 'Sheet2';
   targetNutrients: Record<string, WorkbookNutrientRange>;
 };
 
@@ -41,9 +42,189 @@ export type PoultryWorkbookSnapshot = {
 
 export const poultryWorkbookSnapshot: PoultryWorkbookSnapshot = {
   "workbook": "Poultry Feed data2.xlsx",
-  "version": "2026-03-03",
-  "generatedAt": "2026-03-03T09:27:10.582442Z",
+  "version": "2026-03-07",
+  "generatedAt": "2026-03-07T00:00:00.000Z",
   "standards": [
+    {
+      "stageCode": "FISH_CATFISH_2MM_FINGERLINGS",
+      "name": "Catfish 2mm Fingerlings",
+      "feedCategory": "Catfish",
+      "fishType": "Catfish",
+      "stage": "Fingerlings",
+      "ageGuidance": "2mm feed for fingerlings",
+      "pelletSize": "2mm",
+      "brand": "Fish Workbook",
+      "sourceSheet": "Catfish",
+      "targetNutrients": {
+        "protein": {
+          "min": 0.4,
+          "max": 0.4
+        },
+        "fat": {
+          "min": 0.1,
+          "max": 0.1
+        },
+        "fiber": {
+          "min": 0.015,
+          "max": 0.015
+        },
+        "ash": {
+          "min": 0.075,
+          "max": 0.075
+        },
+        "calcium": {
+          "min": 0.013,
+          "max": 0.013
+        },
+        "phosphorous": {
+          "min": 0.014,
+          "max": 0.014
+        },
+        "lysine": {
+          "min": 0.033,
+          "max": 0.033
+        },
+        "methionine": {
+          "min": 0.016,
+          "max": 0.016
+        }
+      }
+    },
+    {
+      "stageCode": "FISH_CATFISH_3MM_JUVENILES",
+      "name": "Catfish 3mm Juveniles",
+      "feedCategory": "Catfish",
+      "fishType": "Catfish",
+      "stage": "Juveniles",
+      "ageGuidance": "3mm feed for juveniles",
+      "pelletSize": "3mm",
+      "brand": "Fish Workbook",
+      "sourceSheet": "Catfish",
+      "targetNutrients": {
+        "protein": {
+          "min": 0.44,
+          "max": 0.44
+        },
+        "fat": {
+          "min": 0.11,
+          "max": 0.11
+        },
+        "fiber": {
+          "min": 0.03,
+          "max": 0.03
+        },
+        "ash": {
+          "min": 0.066,
+          "max": 0.066
+        },
+        "calcium": {
+          "min": 0.017,
+          "max": 0.017
+        },
+        "phosphorous": {
+          "min": 0.01,
+          "max": 0.01
+        },
+        "lysine": {
+          "min": 0.031,
+          "max": 0.031
+        },
+        "methionine": {
+          "min": 0.015,
+          "max": 0.015
+        }
+      }
+    },
+    {
+      "stageCode": "FISH_CATFISH_4MM_GROW_OUT",
+      "name": "Catfish 4mm Grow-out",
+      "feedCategory": "Catfish",
+      "fishType": "Catfish",
+      "stage": "Grow-out",
+      "ageGuidance": "4mm feed for grow-outs",
+      "pelletSize": "4mm",
+      "brand": "Fish Workbook",
+      "sourceSheet": "Catfish",
+      "targetNutrients": {
+        "protein": {
+          "min": 0.42,
+          "max": 0.42
+        },
+        "fat": {
+          "min": 0.12,
+          "max": 0.12
+        },
+        "fiber": {
+          "min": 0.024,
+          "max": 0.024
+        },
+        "ash": {
+          "min": 0.065,
+          "max": 0.065
+        },
+        "calcium": {
+          "min": 0.014,
+          "max": 0.014
+        },
+        "phosphorous": {
+          "min": 0.01,
+          "max": 0.01
+        },
+        "lysine": {
+          "min": 0.025,
+          "max": 0.025
+        },
+        "methionine": {
+          "min": 0.01,
+          "max": 0.01
+        }
+      }
+    },
+    {
+      "stageCode": "FISH_CATFISH_6MM_GROW_OUT",
+      "name": "Catfish 6mm Grow-out",
+      "feedCategory": "Catfish",
+      "fishType": "Catfish",
+      "stage": "Grow-out",
+      "ageGuidance": "6mm feed for grow-outs",
+      "pelletSize": "6mm",
+      "brand": "Fish Workbook",
+      "sourceSheet": "Catfish",
+      "targetNutrients": {
+        "protein": {
+          "min": 0.42,
+          "max": 0.42
+        },
+        "fat": {
+          "min": 0.12,
+          "max": 0.12
+        },
+        "fiber": {
+          "min": 0.024,
+          "max": 0.024
+        },
+        "ash": {
+          "min": 0.065,
+          "max": 0.065
+        },
+        "calcium": {
+          "min": 0.017,
+          "max": 0.017
+        },
+        "phosphorous": {
+          "min": 0.014,
+          "max": 0.014
+        },
+        "lysine": {
+          "min": 0.022,
+          "max": 0.022
+        },
+        "methionine": {
+          "min": 0.01,
+          "max": 0.01
+        }
+      }
+    },
     {
       "stageCode": "POULTRY_BROILER_STARTER",
       "name": "Broiler Starter",

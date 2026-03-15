@@ -35,10 +35,19 @@ type StandardDocLike = {
     _id: unknown;
     name: string;
     brand: string;
+    feedCategory: 'Catfish' | 'Poultry';
+    fishType?: string;
     poultryType?: string;
     stage: string;
     stageCode?: string;
     ageGuidance?: string;
+    sourceMeta?: {
+        workbook?: string;
+        sheet?: string;
+        version?: string;
+        inheritedFields?: string[];
+    };
+    isActive: boolean;
     pelletSize: string;
     targetNutrients: Record<string, unknown>;
     toObject: () => Record<string, unknown>;
@@ -113,7 +122,30 @@ const micronutrientPercentNutrients: NutrientKey[] = [
     'phosphorous'
 ];
 
+const FISH_STAGE_ORDER = [
+    'FISH_CATFISH_2MM_FINGERLINGS',
+    'FISH_CATFISH_3MM_JUVENILES',
+    'FISH_CATFISH_4MM_GROW_OUT',
+    'FISH_CATFISH_6MM_GROW_OUT'
+] as const;
+
+const FISH_STAGE_ALIAS_TO_CODE: Record<string, string> = {
+    FRY: 'FISH_CATFISH_2MM_FINGERLINGS',
+    FINGERLING: 'FISH_CATFISH_2MM_FINGERLINGS',
+    FINGERLINGS: 'FISH_CATFISH_2MM_FINGERLINGS',
+    GROWER: 'FISH_CATFISH_3MM_JUVENILES',
+    JUVENILE: 'FISH_CATFISH_3MM_JUVENILES',
+    JUVENILES: 'FISH_CATFISH_3MM_JUVENILES',
+    'GROW OUT': 'FISH_CATFISH_4MM_GROW_OUT',
+    'GROW-OUT': 'FISH_CATFISH_4MM_GROW_OUT',
+    FINISHER: 'FISH_CATFISH_6MM_GROW_OUT'
+};
+
 const normalizeName = (value: string) => value.trim().replace(/\s+/g, ' ').toUpperCase();
+
+const toFeedCategory = (value: unknown): 'Catfish' | 'Poultry' => (
+    normalizeName(String(value || '')) === 'POULTRY' ? 'Poultry' : 'Catfish'
+);
 
 const fingerprintLoadedSource = (rawSnapshot: unknown) => {
     const raw = JSON.stringify({
@@ -124,7 +156,7 @@ const fingerprintLoadedSource = (rawSnapshot: unknown) => {
 
 const normalizeRangeValue = (nutrient: NutrientKey, value: number): number => {
     if (!Number.isFinite(value)) return 0;
-    if (nutrient === 'energy') return Number(Math.max(0, value).toFixed(4));
+    if (nutrient === 'energy') return Math.max(0, value);
 
     let next = value;
 
@@ -137,7 +169,7 @@ const normalizeRangeValue = (nutrient: NutrientKey, value: number): number => {
         next *= 100;
     }
 
-    return Number(Math.max(0, next).toFixed(4));
+    return Math.max(0, next);
 };
 
 const validateStandardRange = (nutrient: NutrientKey, range: NutrientRange): string[] => {
@@ -245,9 +277,7 @@ const sanitizeIngredientNutrients = (input: Record<string, number>): Record<Nutr
     const sanitized = {} as Record<NutrientKey, number>;
     STANDARD_NUTRIENTS.forEach((nutrient) => {
         const value = Number(input[nutrient] || 0);
-        sanitized[nutrient] = nutrient === 'energy'
-            ? Number(Math.max(0, value).toFixed(4))
-            : Number(Math.max(0, value).toFixed(4));
+        sanitized[nutrient] = normalizeRangeValue(nutrient, value);
     });
     return sanitized;
 };
@@ -255,6 +285,77 @@ const sanitizeIngredientNutrients = (input: Record<string, number>): Record<Nutr
 const resolveIngredientName = (name: string, aliases: Record<string, string>) => {
     const normalized = normalizeName(name);
     return aliases[normalized] || normalized;
+};
+
+const parsePelletMm = (value: string): number => {
+    const match = value.match(/(\d+(?:\.\d+)?)/);
+    return match ? Number(match[1]) : 0;
+};
+
+const normalizeFishStageAlias = (stageCode: string, stageLabel: string, name: string): string => {
+    const normalizedCode = normalizeName(stageCode);
+    if (FISH_STAGE_ORDER.includes(normalizedCode as typeof FISH_STAGE_ORDER[number])) {
+        return normalizedCode;
+    }
+    const candidates = [stageLabel, name]
+        .map((value) => normalizeName(value).replace(/^CATFISH\s+/i, ''))
+        .filter(Boolean);
+    for (const candidate of candidates) {
+        if (FISH_STAGE_ALIAS_TO_CODE[candidate]) {
+            return FISH_STAGE_ALIAS_TO_CODE[candidate];
+        }
+    }
+    return normalizedCode;
+};
+
+const inferFishEnergyRange = (
+    stageCode: string,
+    pelletSize: string,
+    standards: StandardDocLike[]
+): NutrientRange | null => {
+    const normalizedStageCode = normalizeFishStageAlias(stageCode, '', '');
+    const directStage = standards.find((standard) => (
+        toFeedCategory(standard.feedCategory) === 'Catfish'
+        && normalizeFishStageAlias(
+            standard.stageCode || '',
+            standard.stage || '',
+            standard.name || ''
+        ) === normalizedStageCode
+        && Number((standard.targetNutrients as Record<string, NutrientRange>)?.energy?.min) > 0
+    ));
+    if (directStage) {
+        const energy = (directStage.targetNutrients as Record<string, NutrientRange>).energy;
+        if (energy && Number.isFinite(energy.min) && Number.isFinite(energy.max)) {
+            return { min: Number(energy.min), max: Number(energy.max) };
+        }
+    }
+
+    const pellet = parsePelletMm(pelletSize);
+    const candidates = standards
+        .filter((standard) => toFeedCategory(standard.feedCategory) === 'Catfish')
+        .map((standard) => {
+            const target = (standard.targetNutrients as Record<string, NutrientRange>)?.energy;
+            return {
+                standard,
+                energy: target,
+                pellet: parsePelletMm(String(standard.pelletSize || ''))
+            };
+        })
+        .filter((row) => row.energy && Number(row.energy.min) > 0);
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort((a, b) => {
+        const aDistance = Math.abs(a.pellet - pellet);
+        const bDistance = Math.abs(b.pellet - pellet);
+        return aDistance - bDistance;
+    });
+
+    const selected = candidates[0].energy as NutrientRange;
+    return {
+        min: Number(selected.min),
+        max: Number(selected.max)
+    };
 };
 
 const buildExistingIngredientLookup = (ingredients: IngredientDocLike[]) => {
@@ -273,7 +374,18 @@ const buildExistingStandardLookup = (standards: StandardDocLike[]) => {
     const byName = new Map<string, StandardDocLike>();
 
     standards.forEach((standard) => {
-        if (standard.stageCode) byStageCode.set(normalizeName(standard.stageCode), standard);
+        if (standard.stageCode) {
+            const normalizedStageCode = normalizeName(standard.stageCode);
+            byStageCode.set(normalizedStageCode, standard);
+            if (toFeedCategory(standard.feedCategory) === 'Catfish') {
+                const alias = normalizeFishStageAlias(
+                    normalizedStageCode,
+                    standard.stage || '',
+                    standard.name || ''
+                );
+                byStageCode.set(alias, standard);
+            }
+        }
         byName.set(normalizeName(standard.name), standard);
     });
 
@@ -290,7 +402,7 @@ const createPreview = async (options: PreviewOptions = {}): Promise<PreviewResul
         }, {});
 
     const [existingStandards, existingIngredients] = await Promise.all([
-        FeedStandard.find({ feedCategory: 'Poultry' }) as unknown as Promise<StandardDocLike[]>,
+        FeedStandard.find({ feedCategory: { $in: ['Poultry', 'Catfish'] } }) as unknown as Promise<StandardDocLike[]>,
         Ingredient.find({}) as unknown as Promise<IngredientDocLike[]>
     ]);
 
@@ -301,13 +413,49 @@ const createPreview = async (options: PreviewOptions = {}): Promise<PreviewResul
     const standardActions: StandardAction[] = [];
     const ingredientActions: IngredientAction[] = [];
 
+    const workbookFishStageCodes = new Set<string>();
+
     for (const standard of workbookSnapshot.standards) {
-        const key = normalizeName(standard.stageCode);
+        const feedCategory = toFeedCategory(standard.feedCategory);
+        const normalizedStageCode = feedCategory === 'Catfish'
+            ? normalizeFishStageAlias(standard.stageCode, standard.stage, standard.name)
+            : normalizeName(standard.stageCode);
+        const key = normalizedStageCode;
+        if (feedCategory === 'Catfish') workbookFishStageCodes.add(normalizedStageCode);
         const existing =
             standardLookup.byStageCode.get(key)
             || standardLookup.byName.get(normalizeName(standard.name));
 
         const targetNutrients = sanitizeStandardTargets(standard.targetNutrients as Record<string, NutrientRange>);
+        const inheritedFields: string[] = [];
+        const hasEnergyTarget = (
+            Number(targetNutrients.energy?.min || 0) > 0
+            || Number(targetNutrients.energy?.max || 0) > 0
+        );
+        if (feedCategory === 'Catfish' && !hasEnergyTarget) {
+            const inferredEnergy = inferFishEnergyRange(normalizedStageCode, standard.pelletSize, existingStandards);
+            if (inferredEnergy) {
+                targetNutrients.energy = {
+                    min: normalizeRangeValue('energy', inferredEnergy.min),
+                    max: normalizeRangeValue('energy', inferredEnergy.max)
+                };
+                inheritedFields.push('energy');
+                flaggedItems.push({
+                    entityType: 'standard',
+                    key,
+                    reasons: ['energy target inherited from nearest legacy fish standard'],
+                    severity: 'warning'
+                });
+            } else {
+                flaggedItems.push({
+                    entityType: 'standard',
+                    key,
+                    reasons: ['energy target missing in workbook and no legacy fish energy found'],
+                    severity: 'warning'
+                });
+            }
+        }
+
         const issues = STANDARD_NUTRIENTS
             .flatMap((nutrient) => {
                 const range = targetNutrients[nutrient];
@@ -318,17 +466,20 @@ const createPreview = async (options: PreviewOptions = {}): Promise<PreviewResul
         const nextDoc: Record<string, unknown> = {
             name: standard.name,
             brand: standard.brand,
-            feedCategory: 'Poultry',
-            poultryType: standard.poultryType,
+            feedCategory,
+            ...(feedCategory === 'Poultry'
+                ? { poultryType: standard.poultryType }
+                : { fishType: standard.fishType || 'Catfish' }),
             stage: standard.stage,
-            stageCode: standard.stageCode,
+            stageCode: normalizedStageCode,
             ageGuidance: standard.ageGuidance,
             pelletSize: standard.pelletSize,
             targetNutrients,
             sourceMeta: {
                 workbook: workbookSnapshot.workbook,
                 sheet: standard.sourceSheet,
-                version: workbookSnapshot.version
+                version: workbookSnapshot.version,
+                inheritedFields
             },
             isActive: true
         };
@@ -364,11 +515,14 @@ const createPreview = async (options: PreviewOptions = {}): Promise<PreviewResul
         const changed =
             existing.name !== standard.name
             || existing.brand !== standard.brand
+            || toFeedCategory(existing.feedCategory) !== feedCategory
+            || (existing.fishType || '') !== (feedCategory === 'Catfish' ? (standard.fishType || 'Catfish') : '')
             || (existing.poultryType || '') !== standard.poultryType
             || existing.stage !== standard.stage
-            || (existing.stageCode || '') !== standard.stageCode
+            || normalizeName(existing.stageCode || '') !== normalizedStageCode
             || (existing.ageGuidance || '') !== standard.ageGuidance
             || existing.pelletSize !== standard.pelletSize
+            || normalizeName(String(existing.sourceMeta?.version || '')) !== normalizeName(workbookSnapshot.version)
             || !rangesEqual(currentRanges, targetNutrients);
 
         standardActions.push({
@@ -379,6 +533,29 @@ const createPreview = async (options: PreviewOptions = {}): Promise<PreviewResul
             notes: []
         });
     }
+
+    existingStandards
+        .filter((standard) => (
+            toFeedCategory(standard.feedCategory) === 'Catfish'
+            && standard.isActive
+            && normalizeName(String(standard.sourceMeta?.version || '')) !== normalizeName(workbookSnapshot.version)
+        ))
+        .forEach((standard) => {
+            const normalizedStageCode = normalizeName(standard.stageCode || '');
+            if (normalizedStageCode && workbookFishStageCodes.has(normalizedStageCode)) return;
+            const { _id, __v, ...serializable } = standard.toObject() as Record<string, unknown>;
+
+            standardActions.push({
+                action: 'update',
+                key: normalizeName(`LEGACY_${standard._id}`),
+                before: standard.toObject() as unknown as Record<string, unknown>,
+                after: {
+                    ...serializable,
+                    isActive: false
+                },
+                notes: ['deactivated legacy fish standard in favor of workbook-derived stages']
+            });
+        });
 
     for (const ingredient of workbookSnapshot.ingredients) {
         const sourceName = normalizeName(ingredient.name);

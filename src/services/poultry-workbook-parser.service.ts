@@ -53,11 +53,34 @@ const parseLiveWorkbook = (workbookPath: string): PoultryWorkbookSnapshot | null
     try {
         const parsed = JSON.parse(command.stdout) as {
             workbook: string;
+            generatedAt?: string | number;
+            version?: string;
+            standards?: PoultryWorkbookSnapshot['standards'];
             ingredients: PoultryWorkbookSnapshot['ingredients'];
         };
         const snapshot = cloneSnapshot();
         snapshot.workbook = parsed.workbook || snapshot.workbook;
+        if (parsed.version && typeof parsed.version === 'string') {
+            snapshot.version = parsed.version;
+        }
+        if (parsed.generatedAt !== undefined) {
+            if (typeof parsed.generatedAt === 'number') {
+                snapshot.generatedAt = new Date(parsed.generatedAt * 1000).toISOString();
+            } else if (typeof parsed.generatedAt === 'string') {
+                snapshot.generatedAt = parsed.generatedAt;
+            }
+        }
         snapshot.ingredients = parsed.ingredients || snapshot.ingredients;
+        if (Array.isArray(parsed.standards) && parsed.standards.length > 0) {
+            const byStageCode = new Map<string, PoultryWorkbookSnapshot['standards'][number]>();
+            snapshot.standards.forEach((standard) => {
+                byStageCode.set(standard.stageCode, standard);
+            });
+            parsed.standards.forEach((standard) => {
+                byStageCode.set(standard.stageCode, standard);
+            });
+            snapshot.standards = Array.from(byStageCode.values());
+        }
         return snapshot;
     } catch (_error) {
         return null;
