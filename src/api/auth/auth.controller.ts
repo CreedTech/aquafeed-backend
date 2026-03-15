@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import User from '../../models/User';
 import { generateOTP, storeOTP, verifyOTP } from '../../utils/otp.util';
 import { sendOTP } from '../../services/email.service';
+import { isDatabaseReady, isTransientMongoError } from '../../config/database';
 
 const resolveAuthenticatedUserId = (req: Request): string | null => (
     req.userId || req.session?.userId || null
@@ -40,6 +41,14 @@ export const requestOtp = async (req: Request, res: Response) => {
             return;
         }
 
+        if (!isDatabaseReady()) {
+            res.status(503).json({
+                error: 'Service temporarily unavailable',
+                message: 'Database connection is unstable. Please retry in a few seconds.'
+            });
+            return;
+        }
+
         // Generate and store OTP
         const otp = generateOTP();
         await storeOTP(email, otp);
@@ -55,6 +64,13 @@ export const requestOtp = async (req: Request, res: Response) => {
 
     } catch (error) {
         console.error('Request OTP Error:', error);
+        if (isTransientMongoError(error)) {
+            res.status(503).json({
+                error: 'Service temporarily unavailable',
+                message: 'Database connection was interrupted. Please retry in a few seconds.'
+            });
+            return;
+        }
         res.status(500).json({ error: 'Internal server error' });
     }
 };
@@ -68,6 +84,14 @@ export const verifyOtp = async (req: Request, res: Response) => {
 
         if (!email || !otp) {
             res.status(400).json({ error: 'Email and OTP are required' });
+            return;
+        }
+
+        if (!isDatabaseReady()) {
+            res.status(503).json({
+                error: 'Service temporarily unavailable',
+                message: 'Database connection is unstable. Please retry in a few seconds.'
+            });
             return;
         }
 
@@ -108,6 +132,13 @@ export const verifyOtp = async (req: Request, res: Response) => {
 
     } catch (error) {
         console.error('Verify OTP Error:', error);
+        if (isTransientMongoError(error)) {
+            res.status(503).json({
+                error: 'Service temporarily unavailable',
+                message: 'Database connection was interrupted. Please retry in a few seconds.'
+            });
+            return;
+        }
         res.status(500).json({ error: 'Internal server error' });
     }
 };

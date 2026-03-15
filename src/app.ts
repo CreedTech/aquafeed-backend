@@ -2,7 +2,7 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import connectDatabase from './config/database';
+import connectDatabase, { getMongoClientOptions } from './config/database';
 import { apiLimiter } from './middleware/rate-limit.middleware';
 
 // Load environment variables
@@ -110,6 +110,7 @@ app.use(session({
     saveUninitialized: false,
     store: MongoStore.create({
         mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/aquafeed',
+        mongoOptions: getMongoClientOptions(),
         collectionName: 'sessions',
         ttl: 60 * 60 * 24 * 30 // 30 days
     }),
@@ -132,6 +133,7 @@ import batchRoutes from './api/batches/batch.routes';
 import adminRoutes from './api/admin/admin.routes';
 import paymentRoutes from './api/payment/payment.routes';
 import templateRoutes from './api/formulations/template.routes';
+import aiRoutes from './api/ai/ai.routes';
 import { openApiSpec } from './config/swagger';
 import scalarHtml from './config/scalarHtml';
 
@@ -188,6 +190,7 @@ app.use('/api/v1/payments', paymentRoutes);
 // Backward-compatible alias for older integrations using singular path.
 app.use('/api/v1/payment', paymentRoutes);
 app.use('/api/v1/templates', templateRoutes);
+app.use('/api/v1/ai', aiRoutes);
 
 // ======================
 // Error Handling
