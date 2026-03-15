@@ -19,6 +19,10 @@ router.post('/users/bulk-block', adminController.bulkBlockUsers);
 router.patch('/users/:id', adminController.updateUser);
 router.get('/stats', adminController.getSystemStats);
 router.get('/chart-data', adminController.getChartData);
+router.get('/ai/usage-summary', adminController.getAiUsageSummary);
+router.get('/ai/logs', adminController.getAiLogs);
+router.get('/ai/jobs/:jobId/trace', adminController.getAiJobTrace);
+router.get('/ai/openrouter-models', adminController.getOpenRouterModels);
 
 // Category Management
 router.get('/categories', categoryController.getAllCategories);
@@ -53,6 +57,10 @@ router.get('/imports/poultry-workbook', dataImportController.getRecentPoultryWor
 
 // Formulations (Read-only for admin - but allowed to delete)
 router.get('/formulations', adminController.getAllFormulations);
+router.get('/formulations/analytics/overview', adminController.getFormulationAnalyticsOverviewAdmin);
+router.get('/formulations/analytics/trends', adminController.getFormulationAnalyticsTrendsAdmin);
+router.get('/formulations/:id/calculation-ledger', adminController.getFormulationCalculationLedgerAdmin);
+router.post('/formulations/:id/export', adminController.exportFormulationReportAdmin);
 router.delete('/formulations/:id', adminController.deleteFormulation);
 router.post('/formulations/bulk-delete', adminController.bulkDeleteFormulations);
 

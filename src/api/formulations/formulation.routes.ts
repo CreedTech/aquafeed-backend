@@ -7,6 +7,10 @@ import {
     getAlternativeCacheResult,
     getFormulationPricing,
     getFormulationSummary,
+    getFormulationAnalyticsOverview,
+    getFormulationAnalyticsTrends,
+    getCalculationLedger,
+    exportFormulationReport,
     unlockFormulation,
     getFormulations
 } from './formulation.controller';
@@ -33,6 +37,10 @@ router.post('/alternatives/evaluate', evaluateAlternativeOptions);
 router.get('/alternatives/cache/:cacheKey', getAlternativeCacheResult);
 router.get('/unlock-fee', getFormulationPricing);
 router.get('/summary', getFormulationSummary);
+router.get('/analytics/overview', getFormulationAnalyticsOverview);
+router.get('/analytics/trends', getFormulationAnalyticsTrends);
+router.get('/:id/calculation-ledger', getCalculationLedger);
+router.post('/:id/export', exportFormulationReport);
 
 /**
  * @route   POST /api/v1/formulations/:id/unlock

@@ -6,8 +6,19 @@ import Ingredient from '../../models/Ingredient';
 import Formulation from '../../models/Formulation';
 import Configuration from '../../models/Configuration';
 import FeedTemplate from '../../models/FeedTemplate';
+import AiInteraction from '../../models/AiInteraction';
+import AiJob from '../../models/AiJob';
+import AiJobEvent from '../../models/AiJobEvent';
 import { Types } from 'mongoose';
 import { configService } from '../../services/config.service';
+import {
+    buildCalculationLedger,
+    buildFormulationExport,
+    getAnalyticsOverview,
+    getAnalyticsTrends,
+    getFormulationWithStandard
+} from '../../services/formulation-intelligence.service';
+import { openRouterService } from '../../services/openrouter.service';
 
 const CANONICAL_UNLOCK_FEE_KEY = 'formulation_fee';
 const LEGACY_UNLOCK_FEE_KEY = 'formulation_unlock_fee';
@@ -32,6 +43,24 @@ const parseBooleanQuery = (value: unknown): boolean | undefined => {
 };
 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const parseDateQuery = (value: unknown): Date | undefined => {
+    if (!value) return undefined;
+    const parsed = new Date(String(value));
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+};
+
+const parseFeedTypeQuery = (value: unknown): 'fish' | 'poultry' | undefined => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'fish' || normalized === 'poultry') return normalized;
+    return undefined;
+};
+
+const parsePositiveIntQuery = (value: unknown, fallback: number, min = 1, max = 200): number => {
+    const parsed = Number.parseInt(String(value || ''), 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+};
 
 /**
  * Get all users with pagination and filtering
@@ -223,6 +252,477 @@ export const getChartData = async (_req: Request, res: Response) => {
     } catch (error) {
         console.error('Chart Data Error:', error);
         res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Get AI usage telemetry summary
+ * GET /api/v1/admin/ai/usage-summary
+ */
+export const getAiUsageSummary = async (req: Request, res: Response) => {
+    try {
+        const from = parseDateQuery(req.query.from);
+        const to = parseDateQuery(req.query.to);
+        const match: Record<string, unknown> = {};
+        if (from || to) {
+            const createdAt: Record<string, Date> = {};
+            if (from) createdAt.$gte = from;
+            if (to) createdAt.$lte = to;
+            match.createdAt = createdAt;
+        }
+
+        const [totalsRows, modelRows, dayRows, verificationRows] = await Promise.all([
+            AiInteraction.aggregate([
+                { $match: match },
+                {
+                    $group: {
+                        _id: null,
+                        interactions: { $sum: 1 },
+                        successCount: {
+                            $sum: {
+                                $cond: [{ $eq: ['$status', 'success'] }, 1, 0]
+                            }
+                        },
+                        fallbackCount: {
+                            $sum: {
+                                $cond: [{ $eq: ['$status', 'fallback'] }, 1, 0]
+                            }
+                        },
+                        errorCount: {
+                            $sum: {
+                                $cond: [{ $eq: ['$status', 'error'] }, 1, 0]
+                            }
+                        },
+                        totalTokens: { $sum: '$totalTokens' },
+                        estimatedCostUsd: { $sum: '$estimatedCostUsd' },
+                        avgLatencyMs: { $avg: '$latencyMs' }
+                    }
+                }
+            ]),
+            AiInteraction.aggregate([
+                { $match: match },
+                {
+                    $group: {
+                        _id: '$modelUsed',
+                        count: { $sum: 1 },
+                        totalTokens: { $sum: '$totalTokens' },
+                        estimatedCostUsd: { $sum: '$estimatedCostUsd' }
+                    }
+                },
+                { $sort: { count: -1 } }
+            ]),
+            AiInteraction.aggregate([
+                { $match: match },
+                {
+                    $group: {
+                        _id: {
+                            $dateToString: {
+                                format: '%Y-%m-%d',
+                                date: '$createdAt'
+                            }
+                        },
+                        count: { $sum: 1 },
+                        totalTokens: { $sum: '$totalTokens' },
+                        estimatedCostUsd: { $sum: '$estimatedCostUsd' }
+                    }
+                },
+                { $sort: { _id: 1 } }
+            ]),
+            AiInteraction.aggregate([
+                { $match: match },
+                {
+                    $group: {
+                        _id: '$verificationStatus',
+                        count: { $sum: 1 }
+                    }
+                }
+            ])
+        ]);
+
+        const totals = totalsRows[0] || {
+            interactions: 0,
+            successCount: 0,
+            fallbackCount: 0,
+            errorCount: 0,
+            totalTokens: 0,
+            estimatedCostUsd: 0,
+            avgLatencyMs: 0
+        };
+
+        const verification = verificationRows.reduce<Record<string, number>>((acc, row) => {
+            const key = String(row._id || 'unknown');
+            acc[key] = Number(row.count || 0);
+            return acc;
+        }, { passed: 0, failed: 0 });
+
+        return res.json({
+            totals: {
+                interactions: Number(totals.interactions || 0),
+                successCount: Number(totals.successCount || 0),
+                fallbackCount: Number(totals.fallbackCount || 0),
+                errorCount: Number(totals.errorCount || 0),
+                totalTokens: Number(totals.totalTokens || 0),
+                estimatedCostUsd: Number(Number(totals.estimatedCostUsd || 0).toFixed(8)),
+                avgLatencyMs: Number(Number(totals.avgLatencyMs || 0).toFixed(2)),
+                verification
+            },
+            byModel: modelRows.map((row) => ({
+                model: String(row._id || 'unknown'),
+                count: Number(row.count || 0),
+                totalTokens: Number(row.totalTokens || 0),
+                estimatedCostUsd: Number(Number(row.estimatedCostUsd || 0).toFixed(8))
+            })),
+            daily: dayRows.map((row) => ({
+                date: String(row._id),
+                count: Number(row.count || 0),
+                totalTokens: Number(row.totalTokens || 0),
+                estimatedCostUsd: Number(Number(row.estimatedCostUsd || 0).toFixed(8))
+            }))
+        });
+    } catch (error) {
+        console.error('Get AI usage summary error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Get detailed AI interaction logs (admin diagnostics).
+ * GET /api/v1/admin/ai/logs
+ */
+export const getAiLogs = async (req: Request, res: Response) => {
+    try {
+        const page = parsePositiveIntQuery(req.query.page, 1, 1, 100000);
+        const limit = parsePositiveIntQuery(req.query.limit, 25, 1, 200);
+        const skip = (page - 1) * limit;
+        const includeFull = parseBooleanQuery(req.query.full) === true;
+
+        const from = parseDateQuery(req.query.from);
+        const to = parseDateQuery(req.query.to);
+        const query: Record<string, unknown> = {};
+        if (from || to) {
+            const createdAt: Record<string, Date> = {};
+            if (from) createdAt.$gte = from;
+            if (to) createdAt.$lte = to;
+            query.createdAt = createdAt;
+        }
+
+        const status = String(req.query.status || '').trim().toLowerCase();
+        if (['success', 'fallback', 'error'].includes(status)) {
+            query.status = status;
+        }
+        const verificationStatus = String(req.query.verificationStatus || '').trim().toLowerCase();
+        if (['passed', 'failed'].includes(verificationStatus)) {
+            query.verificationStatus = verificationStatus;
+        }
+        const kind = String(req.query.kind || '').trim().toLowerCase();
+        if (['query', 'what_if'].includes(kind)) {
+            query.kind = kind;
+        }
+
+        const requestId = String(req.query.requestId || '').trim();
+        if (requestId) query.requestId = requestId;
+        const modelUsed = String(req.query.modelUsed || '').trim();
+        if (modelUsed) query.modelUsed = modelUsed;
+
+        const userId = String(req.query.userId || '').trim();
+        if (userId && Types.ObjectId.isValid(userId)) {
+            query.userId = new Types.ObjectId(userId);
+        }
+        const threadId = String(req.query.threadId || '').trim();
+        if (threadId && Types.ObjectId.isValid(threadId)) {
+            query.threadId = new Types.ObjectId(threadId);
+        }
+        const jobId = String(req.query.jobId || '').trim();
+        if (jobId && Types.ObjectId.isValid(jobId)) {
+            query.jobId = new Types.ObjectId(jobId);
+        }
+
+        const search = String(req.query.search || '').trim();
+        if (search) {
+            const safeRegex = new RegExp(escapeRegex(search), 'i');
+            query.$or = [
+                { prompt: safeRegex },
+                { answer: safeRegex },
+                { fallbackMessage: safeRegex },
+                { errorMessage: safeRegex }
+            ];
+        }
+
+        const [rows, total] = await Promise.all([
+            AiInteraction.find(query)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+            AiInteraction.countDocuments(query)
+        ]);
+
+        return res.json({
+            data: rows.map((row: any) => {
+                const mapped = {
+                    id: String(row._id),
+                    createdAt: row.createdAt,
+                    userId: row.userId ? String(row.userId) : null,
+                    threadId: row.threadId ? String(row.threadId) : null,
+                    jobId: row.jobId ? String(row.jobId) : null,
+                    requestId: row.requestId || null,
+                    kind: row.kind,
+                    status: row.status,
+                    verificationStatus: row.verificationStatus,
+                    modelUsed: row.modelUsed || null,
+                    modelPrimary: row.modelPrimary,
+                    modelFallback: row.modelFallback,
+                    fallbackUsed: row.fallbackUsed === true,
+                    latencyMs: Number(row.latencyMs || 0),
+                    queueWaitMs: Number(row.queueWaitMs || 0),
+                    processingMs: Number(row.processingMs || 0),
+                    promptTokens: Number(row.promptTokens || 0),
+                    completionTokens: Number(row.completionTokens || 0),
+                    totalTokens: Number(row.totalTokens || 0),
+                    estimatedCostUsd: Number(row.estimatedCostUsd || 0),
+                    pricingSource: row.pricingSource || 'unknown',
+                    verificationErrors: Array.isArray(row.verificationErrors) ? row.verificationErrors : [],
+                    retrievalSummary: row.retrievalSummary || null,
+                    attempts: Array.isArray(row.attempts) ? row.attempts : [],
+                    promptPreview: String(row.prompt || '').slice(0, 220),
+                    answerPreview: String(row.answer || '').slice(0, 220),
+                    fallbackPreview: String(row.fallbackMessage || '').slice(0, 220),
+                    errorMessage: row.errorMessage || null
+                } as Record<string, unknown>;
+                if (includeFull) {
+                    mapped.prompt = row.prompt || '';
+                    mapped.answer = row.answer || '';
+                    mapped.fallbackMessage = row.fallbackMessage || '';
+                    mapped.citations = Array.isArray(row.citations) ? row.citations : [];
+                    mapped.numericClaims = Array.isArray(row.numericClaims) ? row.numericClaims : [];
+                }
+                return mapped;
+            }),
+            meta: {
+                page,
+                limit,
+                total,
+                pages: Math.max(1, Math.ceil(total / limit))
+            }
+        });
+    } catch (error) {
+        console.error('Get AI logs error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Get full trace for an AI job including SSE events and interactions.
+ * GET /api/v1/admin/ai/jobs/:jobId/trace
+ */
+export const getAiJobTrace = async (req: Request, res: Response) => {
+    try {
+        const { jobId } = req.params;
+        if (!Types.ObjectId.isValid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job id' });
+        }
+        const jobObjectId = new Types.ObjectId(jobId);
+        const job = await AiJob.findById(jobObjectId).lean();
+        if (!job) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+
+        const [events, interactions] = await Promise.all([
+            AiJobEvent.find({ jobId: jobObjectId }).sort({ createdAt: 1 }).lean(),
+            AiInteraction.find({
+                $or: [
+                    { jobId: jobObjectId },
+                    ...(job.requestId ? [{ requestId: job.requestId }] : [])
+                ]
+            }).sort({ createdAt: 1 }).lean()
+        ]);
+
+        return res.json({
+            job: {
+                id: String(job._id),
+                userId: String(job.userId),
+                threadId: String(job.threadId),
+                userMessageId: job.userMessageId ? String(job.userMessageId) : null,
+                assistantMessageId: job.assistantMessageId ? String(job.assistantMessageId) : null,
+                requestId: job.requestId,
+                question: job.question,
+                modelId: job.modelId || null,
+                streamRequested: job.streamRequested !== false,
+                context: {
+                    formulationId: job.context?.formulationId ? String(job.context.formulationId) : null,
+                    feedType: job.context?.feedType || null,
+                    stageCode: job.context?.stageCode || null
+                },
+                status: job.status,
+                result: job.result || null,
+                errorMessage: job.errorMessage || null,
+                startedAt: job.startedAt || null,
+                completedAt: job.completedAt || null,
+                cancelledAt: job.cancelledAt || null,
+                createdAt: job.createdAt,
+                updatedAt: job.updatedAt
+            },
+            events: events.map((event: any) => ({
+                id: String(event._id),
+                eventType: event.eventType,
+                payload: event.payload || {},
+                createdAt: event.createdAt
+            })),
+            interactions: interactions.map((row: any) => ({
+                id: String(row._id),
+                status: row.status,
+                verificationStatus: row.verificationStatus,
+                modelUsed: row.modelUsed || null,
+                fallbackUsed: row.fallbackUsed === true,
+                latencyMs: Number(row.latencyMs || 0),
+                totalTokens: Number(row.totalTokens || 0),
+                estimatedCostUsd: Number(row.estimatedCostUsd || 0),
+                prompt: row.prompt || '',
+                answer: row.answer || '',
+                fallbackMessage: row.fallbackMessage || '',
+                verificationErrors: Array.isArray(row.verificationErrors) ? row.verificationErrors : [],
+                createdAt: row.createdAt
+            }))
+        });
+    } catch (error) {
+        console.error('Get AI job trace error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Get OpenRouter model catalog for admin dropdown configuration.
+ * GET /api/v1/admin/ai/openrouter-models?freeOnly=true|false
+ */
+export const getOpenRouterModels = async (req: Request, res: Response) => {
+    try {
+        const freeOnly = parseBooleanQuery(req.query.freeOnly);
+        const forceRefresh = parseBooleanQuery(req.query.forceRefresh);
+        const models = await openRouterService.getModels({
+            ...(freeOnly !== undefined ? { freeOnly } : {}),
+            ...(forceRefresh !== undefined ? { forceRefresh } : {})
+        });
+        return res.json({
+            models
+        });
+    } catch (error) {
+        console.error('Get OpenRouter Models Error:', error);
+        return res.status(500).json({
+            error: 'Failed to fetch OpenRouter models',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+/**
+ * Admin: Get platform or per-user formulation analytics overview.
+ * GET /api/v1/admin/formulations/analytics/overview
+ */
+export const getFormulationAnalyticsOverviewAdmin = async (req: Request, res: Response) => {
+    try {
+        const from = parseDateQuery(req.query.from);
+        const to = parseDateQuery(req.query.to);
+        const feedType = parseFeedTypeQuery(req.query.feedType);
+        const stageCode = String(req.query.stageCode || '').trim().toUpperCase() || undefined;
+        const userId = Types.ObjectId.isValid(String(req.query.userId || ''))
+            ? String(req.query.userId)
+            : undefined;
+
+        const overview = await getAnalyticsOverview({
+            userId,
+            from,
+            to,
+            feedType,
+            stageCode
+        });
+        return res.json(overview);
+    } catch (error) {
+        console.error('Admin overview analytics error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Admin: Get platform or per-user formulation trend analytics.
+ * GET /api/v1/admin/formulations/analytics/trends
+ */
+export const getFormulationAnalyticsTrendsAdmin = async (req: Request, res: Response) => {
+    try {
+        const metricParam = String(req.query.metric || 'costPerKg');
+        const metric = (
+            metricParam === 'qualityMatch' || metricParam === 'complianceRate'
+                ? metricParam
+                : 'costPerKg'
+        ) as 'costPerKg' | 'qualityMatch' | 'complianceRate';
+        const interval = String(req.query.interval || 'week') === 'day' ? 'day' : 'week';
+        const from = parseDateQuery(req.query.from);
+        const to = parseDateQuery(req.query.to);
+        const feedType = parseFeedTypeQuery(req.query.feedType);
+        const stageCode = String(req.query.stageCode || '').trim().toUpperCase() || undefined;
+        const userId = Types.ObjectId.isValid(String(req.query.userId || ''))
+            ? String(req.query.userId)
+            : undefined;
+
+        const points = await getAnalyticsTrends({
+            userId,
+            metric,
+            interval,
+            from,
+            to,
+            feedType,
+            stageCode
+        });
+
+        return res.json({
+            metric,
+            interval,
+            points
+        });
+    } catch (error) {
+        console.error('Admin trend analytics error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Admin: Get calculation ledger for any formulation
+ * GET /api/v1/admin/formulations/:id/calculation-ledger
+ */
+export const getFormulationCalculationLedgerAdmin = async (req: Request, res: Response) => {
+    try {
+        const formulation = await getFormulationWithStandard(req.params.id);
+        if (!formulation) {
+            return res.status(404).json({ error: 'Formulation not found' });
+        }
+        const ledger = buildCalculationLedger(formulation);
+        return res.json(ledger);
+    } catch (error) {
+        console.error('Admin get formulation calculation ledger error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+/**
+ * Admin: Export any formulation report as CSV or PDF
+ * POST /api/v1/admin/formulations/:id/export
+ */
+export const exportFormulationReportAdmin = async (req: Request, res: Response) => {
+    try {
+        const formatInput = String(req.body?.format || 'csv').toLowerCase();
+        const format = (formatInput === 'pdf' ? 'pdf' : 'csv') as 'csv' | 'pdf';
+        const formulation = await getFormulationWithStandard(req.params.id);
+        if (!formulation) {
+            return res.status(404).json({ error: 'Formulation not found' });
+        }
+
+        const ledger = buildCalculationLedger(formulation);
+        const exported = buildFormulationExport(ledger, format);
+        res.setHeader('Content-Type', exported.mimeType);
+        res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+        return res.send(exported.data);
+    } catch (error) {
+        console.error('Admin export formulation report error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 };
 

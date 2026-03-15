@@ -16,6 +16,14 @@ import solverService, {
 import complianceService from '../../services/compliance.service';
 import { configService } from '../../services/config.service';
 import { alternativeCacheService } from '../../services/alternative-cache.service';
+import {
+    buildCalculationLedger,
+    buildFormulationExport,
+    getAnalyticsOverview,
+    getAnalyticsTrends,
+    getFormulationWithStandardForUser
+} from '../../services/formulation-intelligence.service';
+import { resolveCanonicalStageCode } from '../../utils/stage-code.util';
 
 interface SelectedIngredientInput {
     ingredientId: string;
@@ -28,7 +36,9 @@ interface SelectedIngredientInput {
 
 interface FormulationRequestBody {
     targetWeightKg: number;
-    standardId: string;
+    standardId?: string;
+    stageCode?: string;
+    feedType?: 'fish' | 'poultry';
     selectedIngredients: SelectedIngredientInput[];
     batchName?: string;
     overheadCost?: number;
@@ -88,6 +98,18 @@ const getFeedType = (feedCategory: string): 'fish' | 'poultry' => (
 const getAuthenticatedUserId = (req: Request): string | null => (
     req.userId || req.session?.userId || null
 );
+
+const parseDateQuery = (value: unknown): Date | undefined => {
+    if (!value) return undefined;
+    const parsed = new Date(String(value));
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+};
+
+const parseFeedTypeQuery = (value: unknown): 'fish' | 'poultry' | undefined => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'fish' || normalized === 'poultry') return normalized;
+    return undefined;
+};
 
 const FORMULATION_FEE_KEYS = ['formulation_fee', 'formulation_unlock_fee'];
 
@@ -161,7 +183,9 @@ const coerceFormulationRequest = (body: unknown): FormulationRequestBody => {
     const raw = body as Partial<FormulationRequestBody>;
     return {
         targetWeightKg: Number(raw.targetWeightKg),
-        standardId: String(raw.standardId || ''),
+        standardId: raw.standardId ? String(raw.standardId) : undefined,
+        stageCode: raw.stageCode ? String(raw.stageCode) : undefined,
+        feedType: raw.feedType === 'poultry' ? 'poultry' : raw.feedType === 'fish' ? 'fish' : undefined,
         selectedIngredients: Array.isArray(raw.selectedIngredients)
             ? raw.selectedIngredients.map((i) => ({
                 ingredientId: String(i.ingredientId),
@@ -257,6 +281,48 @@ const applyActionPatchToRequest = (
     return nextRequest;
 };
 
+const hasStandardSelector = (request: FormulationRequestBody) => (
+    Boolean(request.standardId && request.standardId.trim())
+    || Boolean(request.stageCode && request.stageCode.trim())
+);
+
+const resolveStandardForRequest = async (payload: FormulationRequestBody) => {
+    if (payload.standardId && payload.standardId.trim()) {
+        const byId = await FeedStandard.findById(payload.standardId.trim());
+        if (byId) return byId;
+    }
+
+    if (!payload.stageCode || !payload.stageCode.trim()) {
+        return null;
+    }
+
+    const feedType = payload.feedType;
+    const canonicalStageCode = resolveCanonicalStageCode(payload.stageCode, {
+        feedType: feedType || 'fish'
+    });
+    const query: Record<string, unknown> = {
+        stageCode: canonicalStageCode,
+        isActive: true
+    };
+    if (feedType === 'fish') query.feedCategory = 'Catfish';
+    if (feedType === 'poultry') query.feedCategory = 'Poultry';
+
+    const byStageCode = await FeedStandard.findOne(query).sort({ updatedAt: -1 });
+    if (byStageCode) return byStageCode;
+
+    const rawStageCode = String(payload.stageCode || '').trim();
+    const stageFallbackQuery: Record<string, unknown> = {
+        isActive: true,
+        $or: [
+            { stageCode: rawStageCode.toUpperCase() },
+            { stage: { $regex: `^${rawStageCode}$`, $options: 'i' } }
+        ]
+    };
+    if (feedType === 'fish') stageFallbackQuery.feedCategory = 'Catfish';
+    if (feedType === 'poultry') stageFallbackQuery.feedCategory = 'Poultry';
+    return FeedStandard.findOne(stageFallbackQuery).sort({ updatedAt: -1 });
+};
+
 /**
  * Calculate Feed Formulation (The "Joggler")
  * POST /api/v1/formulations/calculate
@@ -287,10 +353,10 @@ const toStructuredInfeasibleResponse = (
 const runFormulationComputation = async (
     payload: FormulationRequestBody
 ): Promise<BuildComputationResult> => {
-    const { targetWeightKg, standardId, selectedIngredients, overheadCost = 0, targetOverrides } = payload;
+    const { targetWeightKg, selectedIngredients, overheadCost = 0, targetOverrides } = payload;
     const effectiveWeightKg = Number(targetWeightKg);
 
-    const standard = await FeedStandard.findById(standardId);
+    const standard = await resolveStandardForRequest(payload);
     if (!standard) {
         throw new Error('Feed standard not found');
     }
@@ -496,10 +562,10 @@ export const calculateFormulation = async (req: Request, res: Response) => {
     try {
         const payload = coerceFormulationRequest(req.body);
 
-        if (!payload.targetWeightKg || !payload.standardId || payload.selectedIngredients.length === 0) {
+        if (!payload.targetWeightKg || !hasStandardSelector(payload) || payload.selectedIngredients.length === 0) {
             return res.status(400).json({
                 error: 'Missing required fields',
-                required: ['targetWeightKg', 'standardId', 'selectedIngredients']
+                required: ['targetWeightKg', 'standardId or stageCode', 'selectedIngredients']
             });
         }
 
@@ -644,10 +710,10 @@ export const previewFormulationFix = async (req: Request, res: Response) => {
         const baseRequest = coerceFormulationRequest(input.originalRequest || req.body);
         const patchedRequest = applyActionPatchToRequest(baseRequest, input.action || {});
 
-        if (!baseRequest.targetWeightKg || !baseRequest.standardId || baseRequest.selectedIngredients.length === 0) {
+        if (!baseRequest.targetWeightKg || !hasStandardSelector(baseRequest) || baseRequest.selectedIngredients.length === 0) {
             return res.status(400).json({
                 error: 'Missing required fields',
-                required: ['targetWeightKg', 'standardId', 'selectedIngredients']
+                required: ['targetWeightKg', 'standardId or stageCode', 'selectedIngredients']
             });
         }
 
@@ -778,7 +844,7 @@ export const evaluateAlternativeOptions = async (req: Request, res: Response) =>
                     price: alternativePrice,
                     category: alternativeIngredient.category
                 },
-                estimatedCostDeltaPerKg: Number((alternativePrice - originalPrice).toFixed(3)),
+                estimatedCostDeltaPerKg: alternativePrice - originalPrice,
                 maxBlendPercent: rule.maxBlendPercent || 100,
                 notes: rule.notes
             };
@@ -975,8 +1041,8 @@ export const getFormulationSummary = async (req: Request, res: Response) => {
                 unlocked,
                 locked: Math.max(0, total - unlocked),
                 compliant: green,
-                avgQualityMatch: Number(avgQualityMatch.toFixed(2)),
-                totalCost: Number(totalCost.toFixed(2)),
+                avgQualityMatch,
+                totalCost,
                 feedTypeCounts
             },
             recentMixes
@@ -985,6 +1051,152 @@ export const getFormulationSummary = async (req: Request, res: Response) => {
         console.error('Error fetching formulation summary:', error);
         return res.status(500).json({
             error: 'Failed to fetch formulation summary',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+/**
+ * Get data-dense formulation analytics overview.
+ * GET /api/v1/formulations/analytics/overview
+ */
+export const getFormulationAnalyticsOverview = async (req: Request, res: Response) => {
+    try {
+        const userId = getAuthenticatedUserId(req);
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+        }
+
+        const from = parseDateQuery(req.query.from);
+        const to = parseDateQuery(req.query.to);
+        const feedType = parseFeedTypeQuery(req.query.feedType);
+        const stageCode = String(req.query.stageCode || '').trim().toUpperCase() || undefined;
+
+        const overview = await getAnalyticsOverview({
+            userId,
+            from,
+            to,
+            feedType,
+            stageCode
+        });
+
+        return res.json(overview);
+    } catch (error) {
+        console.error('Error fetching formulation analytics overview:', error);
+        return res.status(500).json({
+            error: 'Failed to fetch formulation analytics overview',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+/**
+ * Get formulation analytics trend points.
+ * GET /api/v1/formulations/analytics/trends
+ */
+export const getFormulationAnalyticsTrends = async (req: Request, res: Response) => {
+    try {
+        const userId = getAuthenticatedUserId(req);
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+        }
+
+        const metricParam = String(req.query.metric || 'costPerKg');
+        const metric = (
+            metricParam === 'qualityMatch' || metricParam === 'complianceRate'
+                ? metricParam
+                : 'costPerKg'
+        ) as 'costPerKg' | 'qualityMatch' | 'complianceRate';
+        const intervalParam = String(req.query.interval || 'week');
+        const interval = (intervalParam === 'day' ? 'day' : 'week') as 'day' | 'week';
+        const from = parseDateQuery(req.query.from);
+        const to = parseDateQuery(req.query.to);
+        const feedType = parseFeedTypeQuery(req.query.feedType);
+        const stageCode = String(req.query.stageCode || '').trim().toUpperCase() || undefined;
+
+        const points = await getAnalyticsTrends({
+            userId,
+            metric,
+            interval,
+            from,
+            to,
+            feedType,
+            stageCode
+        });
+
+        return res.json({
+            metric,
+            interval,
+            points
+        });
+    } catch (error) {
+        console.error('Error fetching formulation analytics trends:', error);
+        return res.status(500).json({
+            error: 'Failed to fetch formulation analytics trends',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+/**
+ * Get explicit calculation ledger for a formulation.
+ * GET /api/v1/formulations/:id/calculation-ledger
+ */
+export const getCalculationLedger = async (req: Request, res: Response) => {
+    try {
+        const userId = getAuthenticatedUserId(req);
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+        }
+
+        const formulation = await getFormulationWithStandardForUser(req.params.id, userId);
+        if (!formulation) {
+            return res.status(404).json({ error: 'Formulation not found' });
+        }
+
+        const ledger = buildCalculationLedger(formulation);
+        return res.json(ledger);
+    } catch (error) {
+        console.error('Error fetching formulation calculation ledger:', error);
+        return res.status(500).json({
+            error: 'Failed to fetch formulation calculation ledger',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+/**
+ * Export formulation report as CSV or PDF.
+ * POST /api/v1/formulations/:id/export
+ */
+export const exportFormulationReport = async (req: Request, res: Response) => {
+    try {
+        const userId = getAuthenticatedUserId(req);
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+        }
+
+        const formatInput = String(req.body?.format || 'csv').toLowerCase();
+        const format = (formatInput === 'pdf' ? 'pdf' : 'csv') as 'csv' | 'pdf';
+        const formulation = await getFormulationWithStandardForUser(req.params.id, userId);
+        if (!formulation) {
+            return res.status(404).json({ error: 'Formulation not found' });
+        }
+
+        const ledger = buildCalculationLedger(formulation);
+        const exported = buildFormulationExport(ledger, format);
+
+        res.setHeader('Content-Type', exported.mimeType);
+        res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+
+        if (Buffer.isBuffer(exported.data)) {
+            return res.send(exported.data);
+        }
+        return res.send(exported.data);
+    } catch (error) {
+        console.error('Error exporting formulation report:', error);
+        return res.status(500).json({
+            error: 'Failed to export formulation report',
             details: error instanceof Error ? error.message : 'Unknown error'
         });
     }
