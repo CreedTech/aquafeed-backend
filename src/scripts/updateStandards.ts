@@ -11,7 +11,7 @@ dotenv.config();
 const STANDARDS_2026 = [
     // Fry - 0.3mm to 0.8mm pellet (newly hatched)
     {
-        name: 'Fry Premium 0.5mm',
+        name: 'Fry 0.5mm',
         brand: 'AquaFeed Pro',
         pelletSize: '0.5mm',
         fishType: 'Catfish',
@@ -32,7 +32,7 @@ const STANDARDS_2026 = [
     },
     // Fingerling - 1mm to 2mm pellet
     {
-        name: 'Fingerling Premium 1.5mm',
+        name: 'Fingerling 1.5mm',
         brand: 'AquaFeed Pro',
         pelletSize: '1.5mm',
         fishType: 'Catfish',
@@ -53,7 +53,7 @@ const STANDARDS_2026 = [
     },
     // Grower - 3mm to 4mm pellet
     {
-        name: 'Grower Premium 3mm',
+        name: 'Grower 3mm',
         brand: 'AquaFeed Pro',
         pelletSize: '3mm',
         fishType: 'Catfish',
@@ -73,7 +73,7 @@ const STANDARDS_2026 = [
         isActive: true
     },
     {
-        name: 'Grower Economy 4mm',
+        name: 'Grower 4mm',
         brand: 'AquaFeed Pro',
         pelletSize: '4mm',
         fishType: 'Catfish',
@@ -94,7 +94,7 @@ const STANDARDS_2026 = [
     },
     // Finisher - 4.5mm to 6mm pellet
     {
-        name: 'Finisher Premium 4.5mm',
+        name: 'Finisher 4.5mm',
         brand: 'AquaFeed Pro',
         pelletSize: '4.5mm',
         fishType: 'Catfish',
@@ -114,7 +114,7 @@ const STANDARDS_2026 = [
         isActive: true
     },
     {
-        name: 'Finisher Economy 6mm',
+        name: 'Finisher 6mm',
         brand: 'AquaFeed Pro',
         pelletSize: '6mm',
         fishType: 'Catfish',

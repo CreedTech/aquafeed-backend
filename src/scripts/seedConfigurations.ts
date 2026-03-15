@@ -79,6 +79,107 @@ const configs = [
         value: 'cost_first',
         description: 'Ranking strategy for suggested actions (cost_first/compliance_first/balanced)',
         category: 'SOLVER'
+    },
+    // AI (OpenRouter) runtime controls
+    {
+        key: 'ai_enabled',
+        value: true,
+        description: 'Enable backend AI formulation analyst endpoints',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_openrouter_base_url',
+        value: 'https://openrouter.ai/api/v1',
+        description: 'OpenRouter base URL',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_openrouter_primary_model',
+        value: 'meta-llama/llama-3.1-8b-instruct:free',
+        description: 'Primary OpenRouter model for formulation analyst',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_openrouter_fallback_model',
+        value: 'openai/gpt-4o-mini',
+        description: 'Fallback OpenRouter model',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_free_first_enabled',
+        value: true,
+        description: 'Route AI requests to free OpenRouter models first',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_allow_paid_fallback',
+        value: false,
+        description: 'Allow paid-model fallback when free route fails',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_default_free_model',
+        value: 'meta-llama/llama-3.1-8b-instruct:free',
+        description: 'Preferred free OpenRouter model when free-first routing is enabled',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_paid_fallback_model',
+        value: 'openai/gpt-4o-mini',
+        description: 'Paid fallback OpenRouter model when enabled',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_openrouter_temperature',
+        value: 0.2,
+        description: 'Sampling temperature for analyst responses',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_openrouter_max_tokens',
+        value: 1400,
+        description: 'Maximum completion tokens for analyst responses',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_free_model_allowlist',
+        value: [
+            'meta-llama/llama-3.1-8b-instruct:free',
+            'qwen/qwen3-14b:free',
+            'google/gemma-3-12b-it:free'
+        ],
+        description: 'Allowed free models shown to users in mobile AI model dropdown',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_openrouter_timeout_ms',
+        value: 20000,
+        description: 'Request timeout (ms) for OpenRouter calls',
+        category: 'SYSTEM'
+    },
+    {
+        key: 'ai_cost_input_per_1k',
+        value: 0.00015,
+        description: 'Estimated input token cost in USD per 1k tokens',
+        category: 'FINANCIAL'
+    },
+    {
+        key: 'ai_cost_output_per_1k',
+        value: 0.0006,
+        description: 'Estimated output token cost in USD per 1k tokens',
+        category: 'FINANCIAL'
+    },
+    {
+        key: 'ai_soft_budget_daily_usd',
+        value: 0.5,
+        description: 'Daily AI alert threshold in USD (no billing action)',
+        category: 'FINANCIAL'
+    },
+    {
+        key: 'ai_soft_budget_monthly_usd',
+        value: 5,
+        description: 'Monthly AI alert threshold in USD (no billing action)',
+        category: 'FINANCIAL'
     }
 ];
 

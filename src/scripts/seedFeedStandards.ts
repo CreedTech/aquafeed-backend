@@ -26,7 +26,7 @@ async function seedFeedStandards() {
         const standards = [
             // --- CATFISH ---
             {
-                name: 'Catfish Fry Premium 0.5mm',
+                name: 'Catfish Fry 0.5mm',
                 brand: 'AquaFeed Pro',
                 pelletSize: '0.5mm',
                 feedCategory: 'Catfish',
@@ -48,7 +48,7 @@ async function seedFeedStandards() {
                 isActive: true
             },
             {
-                name: 'Catfish Grower Premium 3mm',
+                name: 'Catfish Grower 3mm',
                 brand: 'AquaFeed Pro',
                 pelletSize: '3mm',
                 feedCategory: 'Catfish',
@@ -72,7 +72,7 @@ async function seedFeedStandards() {
 
             // --- POULTRY: BROILER ---
             {
-                name: 'Broiler Starter Premium',
+                name: 'Broiler Starter',
                 brand: 'PoultryPro',
                 pelletSize: 'Mash/Crumble',
                 feedCategory: 'Poultry',
@@ -93,7 +93,7 @@ async function seedFeedStandards() {
                 isActive: true
             },
             {
-                name: 'Broiler Grower Premium',
+                name: 'Broiler Grower',
                 brand: 'PoultryPro',
                 pelletSize: 'Pellet',
                 feedCategory: 'Poultry',
@@ -114,7 +114,7 @@ async function seedFeedStandards() {
                 isActive: true
             },
             {
-                name: 'Broiler Finisher Premium',
+                name: 'Broiler Finisher',
                 brand: 'PoultryPro',
                 pelletSize: 'Pellet',
                 feedCategory: 'Poultry',
