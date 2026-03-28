@@ -22,6 +22,11 @@ export interface IAiResponseBlock {
     rows?: Record<string, unknown>[];
 }
 
+export interface IAiRedirectTarget {
+    type: 'unlock_formulation' | 'open_formulation' | 'supported_topics' | 'none';
+    formulationId?: string;
+}
+
 export interface IAiMessage extends Document {
     conversationId: mongoose.Types.ObjectId;
     userId: mongoose.Types.ObjectId;
@@ -34,7 +39,7 @@ export interface IAiMessage extends Document {
     thoughtProcess?: string;
     citations: string[];
     numericClaims: IAiMessageNumericClaim[];
-    verificationStatus?: 'passed' | 'failed';
+    verificationStatus?: 'passed' | 'failed' | 'not_applicable';
     fallbackMessage?: string;
     reasoningSummary?: string;
     confidence?: number;
@@ -42,6 +47,10 @@ export interface IAiMessage extends Document {
     followUpPrompts?: string[];
     toolTrace?: Array<Record<string, unknown>>;
     sources?: Array<{ type?: string; title?: string; reference?: string }>;
+    policyStatus?: 'allowed' | 'blocked' | 'out_of_scope';
+    policyReason?: 'paid_formulation_required' | 'out_of_domain' | 'unsupported_request' | 'safety_limited';
+    redirectTarget?: IAiRedirectTarget;
+    groundingMode?: 'general' | 'advisory' | 'system_verified' | 'deterministic_formulation';
     modelId?: string;
     scenario?: IAiScenarioMeta;
     createdAt: Date;
@@ -72,6 +81,18 @@ const AiResponseBlockSchema = new Schema<IAiResponseBlock>({
     rows: {
         type: [Schema.Types.Mixed],
         default: []
+    }
+}, { _id: false });
+
+const AiRedirectTargetSchema = new Schema<IAiRedirectTarget>({
+    type: {
+        type: String,
+        enum: ['unlock_formulation', 'open_formulation', 'supported_topics', 'none'],
+        required: true
+    },
+    formulationId: {
+        type: String,
+        trim: true
     }
 }, { _id: false });
 
@@ -127,7 +148,7 @@ const AiMessageSchema = new Schema<IAiMessage>({
     },
     verificationStatus: {
         type: String,
-        enum: ['passed', 'failed']
+        enum: ['passed', 'failed', 'not_applicable']
     },
     fallbackMessage: {
         type: String
@@ -168,6 +189,21 @@ const AiMessageSchema = new Schema<IAiMessage>({
             }
         }],
         default: []
+    },
+    policyStatus: {
+        type: String,
+        enum: ['allowed', 'blocked', 'out_of_scope']
+    },
+    policyReason: {
+        type: String,
+        enum: ['paid_formulation_required', 'out_of_domain', 'unsupported_request', 'safety_limited']
+    },
+    redirectTarget: {
+        type: AiRedirectTargetSchema
+    },
+    groundingMode: {
+        type: String,
+        enum: ['general', 'advisory', 'system_verified', 'deterministic_formulation']
     },
     modelId: {
         type: String,

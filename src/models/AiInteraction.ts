@@ -2,7 +2,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export type AiInteractionKind = 'query' | 'what_if';
 export type AiInteractionStatus = 'success' | 'fallback' | 'error';
-export type AiVerificationStatus = 'passed' | 'failed';
+export type AiVerificationStatus = 'passed' | 'failed' | 'not_applicable';
 export type AiPricingSource = 'model_catalog' | 'config_estimate' | 'unknown';
 
 export interface IAiNumericClaim {
@@ -104,7 +104,7 @@ const AiInteractionSchema = new Schema<IAiInteraction>({
     },
     verificationStatus: {
         type: String,
-        enum: ['passed', 'failed'],
+        enum: ['passed', 'failed', 'not_applicable'],
         required: true
     },
     prompt: {

@@ -29,6 +29,7 @@ export interface OpenRouterModelSummary {
 export interface OpenRouterChatResult {
     rawText: string;
     parsedJson: Record<string, unknown>;
+    parseMode: 'json' | 'fenced_json' | 'embedded_json' | 'plain_text_fallback';
     modelUsed: string;
     fallbackUsed: boolean;
     usage: {
@@ -64,6 +65,14 @@ type RuntimeConfig = {
     timeoutMs: number;
     inputCostPer1k: number;
     outputCostPer1k: number;
+};
+
+type ModelHealthSnapshot = {
+    successes: number;
+    failures: number;
+    avgLatencyMs: number;
+    lastSuccessAt?: number;
+    lastFailureAt?: number;
 };
 
 const parseNumber = (value: unknown, fallback: number): number => {
@@ -108,22 +117,111 @@ const parsePrice = (value: unknown): number | undefined => {
     return n;
 };
 
-const extractJsonObject = (text: string): Record<string, unknown> => {
+const buildPlainTextFallbackPayload = (text: string): Record<string, unknown> => ({
+    answer: text,
+    answerMarkdown: text,
+    citations: [],
+    numericClaims: [],
+    responseBlocks: [
+        {
+            type: 'summary',
+            title: 'Assistant Summary',
+            content: text
+        }
+    ],
+    sources: [],
+    followUpPrompts: [],
+    confidence: 0.68,
+    reasoningSummary: '',
+    toolTrace: []
+});
+
+const tryParseJson = (candidate: string): Record<string, unknown> | null => {
+    try {
+        const parsed = JSON.parse(candidate) as Record<string, unknown>;
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+};
+
+const extractEmbeddedJsonCandidate = (text: string): string | null => {
+    const start = text.indexOf('{');
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < text.length; i += 1) {
+        const char = text[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === '{') {
+            depth += 1;
+            continue;
+        }
+
+        if (char === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return text.slice(start, i + 1);
+            }
+        }
+    }
+
+    return null;
+};
+
+const extractJsonObject = (text: string): {
+    parsedJson: Record<string, unknown>;
+    parseMode: OpenRouterChatResult['parseMode'];
+} => {
     const trimmed = text.trim();
     if (!trimmed) {
         throw new Error('AI response is empty');
     }
 
-    try {
-        return JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-        const fencedMatch = trimmed.match(/```json\s*([\s\S]*?)```/i) || trimmed.match(/```\s*([\s\S]*?)```/i);
-        const candidate = fencedMatch?.[1]?.trim();
-        if (candidate) {
-            return JSON.parse(candidate) as Record<string, unknown>;
-        }
-        throw new Error('AI response is not valid JSON');
+    const direct = tryParseJson(trimmed);
+    if (direct) {
+        return { parsedJson: direct, parseMode: 'json' };
     }
+
+    const fencedMatch = trimmed.match(/```json\s*([\s\S]*?)```/i) || trimmed.match(/```\s*([\s\S]*?)```/i);
+    const fencedCandidate = fencedMatch?.[1]?.trim();
+    if (fencedCandidate) {
+        const fencedParsed = tryParseJson(fencedCandidate);
+        if (fencedParsed) {
+            return { parsedJson: fencedParsed, parseMode: 'fenced_json' };
+        }
+    }
+
+    const embeddedCandidate = extractEmbeddedJsonCandidate(trimmed);
+    if (embeddedCandidate) {
+        const embeddedParsed = tryParseJson(embeddedCandidate);
+        if (embeddedParsed) {
+            return { parsedJson: embeddedParsed, parseMode: 'embedded_json' };
+        }
+    }
+
+    return {
+        parsedJson: buildPlainTextFallbackPayload(trimmed),
+        parseMode: 'plain_text_fallback'
+    };
 };
 
 const extractResponseText = (payload: any): string => {
@@ -140,6 +238,74 @@ const extractResponseText = (payload: any): string => {
 
 class OpenRouterService {
     private modelCache: { expiresAt: number; items: OpenRouterModelSummary[] } | null = null;
+    private unavailableModelCache = new Map<string, number>();
+    private modelHealth = new Map<string, ModelHealthSnapshot>();
+
+    private getModelHealth(modelId: string): ModelHealthSnapshot {
+        return this.modelHealth.get(modelId) || {
+            successes: 0,
+            failures: 0,
+            avgLatencyMs: 0
+        };
+    }
+
+    private scoreModel(modelId: string): number {
+        const health = this.getModelHealth(modelId);
+        const failurePenalty = health.lastFailureAt && (Date.now() - health.lastFailureAt) < (1000 * 60 * 5) ? 6 : 0;
+        const successBoost = health.lastSuccessAt && (Date.now() - health.lastSuccessAt) < (1000 * 60 * 15) ? 3 : 0;
+        const latencyPenalty = health.avgLatencyMs > 0 ? Math.min(8, health.avgLatencyMs / 6000) : 0;
+        return (health.successes * 4) - (health.failures * 3) - failurePenalty - latencyPenalty + successBoost;
+    }
+
+    private rankCandidates(candidateIds: string[], leadingIds: string[] = [], maxCount = candidateIds.length): string[] {
+        const available = candidateIds.filter(Boolean);
+        const pinned = leadingIds.filter((id, index) => available.includes(id) && leadingIds.indexOf(id) === index);
+        const pinnedSet = new Set(pinned);
+        const ranked = available
+            .filter((id, index) => available.indexOf(id) === index)
+            .filter((id) => !pinnedSet.has(id))
+            .sort((a, b) => this.scoreModel(b) - this.scoreModel(a) || a.localeCompare(b));
+        return [...pinned, ...ranked].slice(0, maxCount);
+    }
+
+    private recordModelSuccess(modelId: string, latencyMs: number): void {
+        const current = this.getModelHealth(modelId);
+        const next: ModelHealthSnapshot = {
+            successes: current.successes + 1,
+            failures: current.failures,
+            avgLatencyMs: current.avgLatencyMs > 0
+                ? ((current.avgLatencyMs * Math.max(1, current.successes)) + latencyMs) / (current.successes + 1)
+                : latencyMs,
+            lastSuccessAt: Date.now(),
+            lastFailureAt: current.lastFailureAt
+        };
+        this.modelHealth.set(modelId, next);
+    }
+
+    private recordModelFailure(modelId: string): void {
+        const current = this.getModelHealth(modelId);
+        this.modelHealth.set(modelId, {
+            successes: current.successes,
+            failures: current.failures + 1,
+            avgLatencyMs: current.avgLatencyMs,
+            lastSuccessAt: current.lastSuccessAt,
+            lastFailureAt: Date.now()
+        });
+    }
+
+    private isTemporarilyUnavailable(modelId: string): boolean {
+        const expiresAt = this.unavailableModelCache.get(modelId);
+        if (!expiresAt) return false;
+        if (Date.now() >= expiresAt) {
+            this.unavailableModelCache.delete(modelId);
+            return false;
+        }
+        return true;
+    }
+
+    private markTemporarilyUnavailable(modelId: string): void {
+        this.unavailableModelCache.set(modelId, Date.now() + (1000 * 60 * 30));
+    }
 
     private async getRuntimeConfig(): Promise<RuntimeConfig> {
         const all = await configService.getAll();
@@ -165,7 +331,10 @@ class OpenRouterService {
         const allowPaidFallback = parseBoolean(all.ai_allow_paid_fallback, false);
         const temperature = parseNumber(all.ai_openrouter_temperature, 0.2);
         const maxTokens = Math.max(128, parseInt(String(all.ai_openrouter_max_tokens || 900), 10) || 900);
-        const timeoutMs = Math.max(2000, parseInt(String(all.ai_openrouter_timeout_ms || 20000), 10) || 20000);
+        const timeoutMs = Math.min(
+            15000,
+            Math.max(5000, parseInt(String(all.ai_openrouter_timeout_ms || 12000), 10) || 12000)
+        );
         const inputCostPer1k = parseNumber(all.ai_cost_input_per_1k, 0.00015);
         const outputCostPer1k = parseNumber(all.ai_cost_output_per_1k, 0.0006);
         const apiKey = process.env.OPENROUTER_API_KEY || String(all.ai_openrouter_api_key || '');
@@ -289,7 +458,9 @@ class OpenRouterService {
 
     private async resolveModelCandidates(input: ChatJsonInput, runtime: RuntimeConfig): Promise<string[]> {
         const requestedModel = input.modelOverride?.trim();
-        const unique = (items: string[]) => items.filter((m, index, arr) => m && arr.indexOf(m) === index);
+        const unique = (items: string[]) => items
+            .filter((m, index, arr) => m && arr.indexOf(m) === index)
+            .filter((m) => !this.isTemporarilyUnavailable(m));
 
         let modelsFromCatalog: OpenRouterModelSummary[] = [];
         try {
@@ -314,12 +485,14 @@ class OpenRouterService {
                 if (runtime.modelPrimary && runtime.modelPrimary.toLowerCase().includes(':free')) {
                     candidates.push(runtime.modelPrimary);
                 }
-                candidates.push(...freeCatalogModels.slice(0, 8));
+                candidates.push(...freeCatalogModels);
             }
             if (runtime.allowPaidFallback) {
                 candidates.push(runtime.paidFallbackModel, runtime.modelPrimary, runtime.modelFallback);
             }
-            return unique(candidates);
+            const deduped = unique(candidates);
+            const maxCandidates = requestedIsFree ? (runtime.allowPaidFallback ? 4 : 3) : (runtime.allowPaidFallback ? 3 : 2);
+            return this.rankCandidates(deduped, [requestedModel], maxCandidates);
         }
 
         if (!runtime.freeFirstEnabled) {
@@ -341,7 +514,7 @@ class OpenRouterService {
             candidates.push(runtime.paidFallbackModel, runtime.modelPrimary, runtime.modelFallback);
         }
 
-        return unique(candidates);
+        return this.rankCandidates(unique(candidates), [chosenFree], runtime.allowPaidFallback ? 4 : 3);
     }
 
     async chatJson(input: ChatJsonInput): Promise<OpenRouterChatResult> {
@@ -386,13 +559,21 @@ class OpenRouterService {
                 );
 
                 const rawText = extractResponseText(response.data);
-                const parsedJson = extractJsonObject(rawText);
+                const { parsedJson, parseMode } = extractJsonObject(rawText);
                 const usage = this.normalizeUsage(response.data?.usage);
                 const estimation = this.estimateCost(modelById.get(model), usage, runtime);
+                if (parseMode === 'plain_text_fallback') {
+                    console.warn('[AI][openrouter.non_json_fallback]', {
+                        model,
+                        preview: rawText.slice(0, 240)
+                    });
+                }
+                this.recordModelSuccess(model, Date.now() - startedAt);
 
                 return {
                     rawText,
                     parsedJson,
+                    parseMode,
                     modelUsed: model,
                     fallbackUsed: i > 0,
                     usage,
@@ -406,6 +587,10 @@ class OpenRouterService {
                 const providerMessage = axios.isAxiosError(error)
                     ? String(error.response?.data?.error?.message || error.response?.data?.message || error.message || 'OpenRouter request failed')
                     : (error instanceof Error ? error.message : 'OpenRouter request failed');
+                if (/no endpoints found/i.test(providerMessage)) {
+                    this.markTemporarilyUnavailable(model);
+                }
+                this.recordModelFailure(model);
                 console.warn('[AI][openrouter.attempt_failed]', {
                     model,
                     attempt: i + 1,

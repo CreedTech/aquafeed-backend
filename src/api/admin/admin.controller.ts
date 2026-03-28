@@ -411,7 +411,7 @@ export const getAiLogs = async (req: Request, res: Response) => {
             query.status = status;
         }
         const verificationStatus = String(req.query.verificationStatus || '').trim().toLowerCase();
-        if (['passed', 'failed'].includes(verificationStatus)) {
+        if (['passed', 'failed', 'not_applicable'].includes(verificationStatus)) {
             query.verificationStatus = verificationStatus;
         }
         const kind = String(req.query.kind || '').trim().toLowerCase();

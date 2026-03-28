@@ -44,6 +44,29 @@ type AiResponseBlock = {
     rows?: Record<string, unknown>[];
 };
 
+type AiPolicyStatus = 'allowed' | 'blocked' | 'out_of_scope';
+type AiPolicyReason = 'paid_formulation_required' | 'out_of_domain' | 'unsupported_request' | 'safety_limited' | null;
+type AiGroundingMode = 'general' | 'advisory' | 'system_verified' | 'deterministic_formulation';
+type AiRedirectTarget = {
+    type: 'unlock_formulation' | 'open_formulation' | 'supported_topics' | 'none';
+    formulationId?: string;
+};
+
+type AiQuestionClassificationType =
+    | 'blocked_formulation_generation'
+    | 'advisory_formulation_guidance'
+    | 'system_grounded_query'
+    | 'general_in_scope_chat'
+    | 'out_of_domain';
+
+type AiQuestionClassification = {
+    type: AiQuestionClassificationType;
+    policyStatus: AiPolicyStatus;
+    policyReason: AiPolicyReason;
+    groundingMode: AiGroundingMode;
+    isGreeting: boolean;
+};
+
 type AiAnalystResponse = {
     answer: string;
     answerMarkdown: string;
@@ -58,8 +81,12 @@ type AiAnalystResponse = {
     confidence: number;
     reasoningSummary: string | null;
     toolTrace: Array<Record<string, unknown>>;
-    verificationStatus: 'passed' | 'failed';
+    verificationStatus: 'passed' | 'failed' | 'not_applicable';
     fallbackMessage: string | null;
+    policyStatus: AiPolicyStatus;
+    policyReason: AiPolicyReason;
+    redirectTarget: AiRedirectTarget;
+    groundingMode: AiGroundingMode;
 };
 
 type GlobalFactPack = {
@@ -136,33 +163,51 @@ const verifyClaims = (
     facts: Record<string, { label: string; value: number | string; unit?: string }>
 ) => {
     const errors: string[] = [];
+    const citationWarnings: string[] = [];
+    const usableCitations: string[] = [];
+    const verifiedClaims: NumericClaim[] = [];
+    const rejectedClaims: Array<{ claim: NumericClaim; reason: string }> = [];
 
     citations.forEach((citation) => {
-        if (!facts[citation]) {
-            errors.push(`Unknown citation: ${citation}`);
+        if (facts[citation]) {
+            usableCitations.push(citation);
+        } else {
+            citationWarnings.push(`Unknown citation: ${citation}`);
         }
     });
 
     claims.forEach((claim) => {
         const fact = facts[claim.factId];
         if (!fact) {
-            errors.push(`Unknown factId for numeric claim: ${claim.factId}`);
+            const reason = `Unknown factId for numeric claim: ${claim.factId}`;
+            errors.push(reason);
+            rejectedClaims.push({ claim, reason });
             return;
         }
         const factValue = Number(fact.value);
         if (!Number.isFinite(factValue)) {
-            errors.push(`Fact ${claim.factId} is not numeric`);
+            const reason = `Fact ${claim.factId} is not numeric`;
+            errors.push(reason);
+            rejectedClaims.push({ claim, reason });
             return;
         }
         const tolerance = Math.max(0.01, Math.abs(factValue) * 0.001);
         if (Math.abs(claim.value - factValue) > tolerance) {
-            errors.push(`Numeric mismatch for ${claim.factId}. expected=${factValue}, got=${claim.value}`);
+            const reason = `Numeric mismatch for ${claim.factId}. expected=${factValue}, got=${claim.value}`;
+            errors.push(reason);
+            rejectedClaims.push({ claim, reason });
+            return;
         }
+        verifiedClaims.push(claim);
     });
 
     return {
         passed: errors.length === 0,
-        errors
+        errors,
+        citationWarnings,
+        usableCitations,
+        verifiedClaims,
+        rejectedClaims
     };
 };
 
@@ -389,7 +434,7 @@ const buildGlobalFallbackMessage = (
         `- Average quality match: ${formatPercent(avgQuality)}`,
         `- Average cost per kg: ${formatNgn(avgCost)}/kg`,
         '',
-        'For exact ingredient recommendations, include feed type, stage, and current ingredient prices.'
+        'For exact formulations, use the paid formulation workflow. Here, I can still help with guidance and interpretation.'
     ].join('\n');
 };
 
@@ -460,12 +505,12 @@ const buildVerifiedFallbackBlocks = (
             title: 'Recommended Next Step',
             rows: formulationContext
                 ? [
-                    { action: 'Ask for the best low-cost variant for this same mix.' },
-                    { action: 'Ask which ingredient changes improve compliance first.' }
+                    { action: 'Ask which ingredient changes improve compliance first.' },
+                    { action: 'Ask what this unlocked mix means and what to monitor next.' }
                 ]
                 : [
-                    { action: 'Ask directly for a best formulation using feed type, stage, batch size, and prices.' },
-                    { action: 'Ask for required inputs and the assistant will guide you step by step.' }
+                    { action: 'Ask for stage nutrient targets, ingredient roles, or feed quality guidance.' },
+                    { action: 'Open the formulation flow when you need an exact paid mix output.' }
                 ]
         }
     ];
@@ -553,9 +598,9 @@ const buildVerifiedGuidance = (
 ): string[] => {
     if (!hasFormulationContext) {
         return [
-            'Ask directly for what you need, for example: "best fish formulation for 4mm grow-out, 100kg batch."',
-            'For exact calculations, include feed type, stage, target batch size, and current ingredient prices.',
-            'If any input is missing, ask "what details do you need?" and I will list them clearly.'
+            'Ask for stage nutrient targets, ingredient roles, or feed quality guidance.',
+            'Ask how to improve compliance or reduce cost without requesting an exact recipe.',
+            'Use the formulation flow when you need a paid exact mix output.'
         ];
     }
 
@@ -720,6 +765,44 @@ const pickStageCode = (
     return resolveCanonicalStageCode(input, { feedType });
 };
 
+const inferAiContextFromQuestion = (
+    question: string,
+    feedType?: 'fish' | 'poultry',
+    stageCode?: string
+): {
+    feedType?: 'fish' | 'poultry';
+    stageCode?: string;
+} => {
+    const normalized = String(question || '').toLowerCase();
+    let inferredFeedType = feedType;
+    let inferredStageCode = stageCode;
+
+    if (!inferredFeedType) {
+        if (/\b(catfish|fish|fishes|fingerling|fingerlings|fry|juvenile|juveniles|grower|grow out|grow-out)\b/.test(normalized)) {
+            inferredFeedType = 'fish';
+        } else if (/\b(poultry|broiler|layer|pre-lay|phase 1|phase 2|phase 3)\b/.test(normalized)) {
+            inferredFeedType = 'poultry';
+        }
+    }
+
+    if (!inferredStageCode) {
+        if (/\b(fingerling|fingerlings|fry)\b/.test(normalized)) {
+            inferredStageCode = resolveCanonicalStageCode('fingerling', { feedType: 'fish' });
+        } else if (/\b(juvenile|juveniles|grower)\b/.test(normalized)) {
+            inferredStageCode = resolveCanonicalStageCode('juvenile', { feedType: 'fish' });
+        } else if (/\b(grow out|grow-out)\b/.test(normalized)) {
+            inferredStageCode = resolveCanonicalStageCode('grow out', { feedType: 'fish' });
+        } else if (/\b(finisher)\b/.test(normalized)) {
+            inferredStageCode = resolveCanonicalStageCode('finisher', { feedType: 'fish' });
+        }
+    }
+
+    return {
+        ...(inferredFeedType ? { feedType: inferredFeedType } : {}),
+        ...(inferredStageCode ? { stageCode: inferredStageCode } : {})
+    };
+};
+
 const buildThreadTitle = (question: string) => {
     const normalized = question.trim().replace(/\s+/g, ' ');
     if (!normalized) return 'Formulation Assistant';
@@ -745,6 +828,25 @@ const normalizeSources = (value: unknown): AiSource[] => {
         .filter((item): item is AiSource => item !== null);
 };
 
+const extractStructuredText = (
+    value: unknown,
+    keys: string[] = ['prompt', 'text', 'label', 'action', 'title', 'content']
+): string => {
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+    if (!value || typeof value !== 'object') return '';
+
+    const record = value as Record<string, unknown>;
+    for (const key of keys) {
+        const candidate = record[key];
+        if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+        if ((typeof candidate === 'number' || typeof candidate === 'boolean') && String(candidate).trim()) {
+            return String(candidate).trim();
+        }
+    }
+    return '';
+};
+
 const normalizeResponseBlocks = (value: unknown): AiResponseBlock[] => {
     if (!Array.isArray(value)) return [];
     return value
@@ -756,10 +858,12 @@ const normalizeResponseBlocks = (value: unknown): AiResponseBlock[] => {
             const rows = Array.isArray(item.rows)
                 ? item.rows.filter((row) => row && typeof row === 'object').map((row) => row as Record<string, unknown>)
                 : undefined;
+            const title = extractStructuredText(item.title);
+            const content = extractStructuredText(item.content);
             return {
                 type,
-                ...(item.title ? { title: String(item.title) } : {}),
-                ...(item.content ? { content: String(item.content) } : {}),
+                ...(title ? { title } : {}),
+                ...(content ? { content } : {}),
                 ...(rows && rows.length > 0 ? { rows } : {})
             };
         })
@@ -768,10 +872,270 @@ const normalizeResponseBlocks = (value: unknown): AiResponseBlock[] => {
 
 const normalizeFollowUpPrompts = (value: unknown): string[] => {
     if (!Array.isArray(value)) return [];
-    return value
-        .map((item) => String(item || '').trim())
-        .filter(Boolean)
-        .slice(0, 6);
+    const seen = new Set<string>();
+    const prompts: string[] = [];
+    for (const item of value) {
+        const prompt = extractStructuredText(item);
+        if (!prompt || prompt.toLowerCase() === '[object object]' || seen.has(prompt)) continue;
+        seen.add(prompt);
+        prompts.push(prompt);
+        if (prompts.length >= 6) break;
+    }
+    return prompts;
+};
+
+const isFormulationGuidanceQuestion = (question: string): boolean => {
+    const normalized = String(question || '').toLowerCase();
+    if (!normalized) return false;
+    return /\b(feed|formulation|mix|ration|recipe|formulate|formulator)\b/.test(normalized);
+};
+
+const isGreetingQuestion = (question: string): boolean => (
+    /^(hi|hello|hey|yo|good\s+(morning|afternoon|evening)|how are you|how far|what'?s up)[!,.?\s]*$/i
+        .test(String(question || '').trim())
+);
+
+const isScopeOverviewQuestion = (question: string): boolean => (
+    /\b(what does (the )?app do|what can you do|what are you (here )?for|how can you help|what can i ask|what are your supported topics)\b/i
+        .test(String(question || '').trim())
+);
+
+const isExactFormulationRequest = (question: string): boolean => {
+    const normalized = String(question || '').toLowerCase();
+    if (!normalized) return false;
+    const advisoryReadiness = /\b(when i(?:'m| am)? ready to pay|before i pay|before i unlock|before opening formulation|before i open formulation|when i unlock|full(?:\s+on)? breakdown|break it down|fully compliant feed|compliant feed)\b/.test(normalized)
+        && !/\b(ingredient percentages?|percentages?|kg allocations?|exact (?:mix|recipe|formulation|formula)|least\s*cost|costed (?:mix|recipe|formulation)|solver|calculate|generate)\b/.test(normalized);
+    if (advisoryReadiness) return false;
+    if (detectMixIntentType(normalized)) return true;
+    return /\b(generate|create|make|build|produce|calculate|draft|prepare|formulate)\b[\s\S]{0,50}\b(formulation|formula|mix|recipe|ration)\b/.test(normalized)
+        || /\b(give|provide|tell me|show me)\b[\s\S]{0,25}\b(exact|full|complete|ingredient|costed|least cost|percentage|kg|quantities?)\b[\s\S]{0,40}\b(formulation|formula|mix|recipe|ration)\b/.test(normalized)
+        || /\b(formulation|formula|mix|recipe|ration)\b[\s\S]{0,40}\bfor me\b/.test(normalized)
+        || /\bingredient\b[\s\S]{0,20}\b(percent|percentage|kg|quantit(y|ies))\b/.test(normalized)
+        || /\bcosted\b[\s\S]{0,20}\b(formulation|mix|recipe)\b/.test(normalized)
+        || /\bleast\s*cost\b/.test(normalized);
+};
+
+const isAppHelpQuestion = (question: string): boolean => (
+    /\b(app|aquafeed|dashboard|wallet|payment|unlock|mix attached|thread|chat|screen|feature|how do i use|how to use|formulation page)\b/i
+        .test(String(question || '').trim())
+);
+
+const isSystemGroundedQuestion = (question: string, hasFormulationContext: boolean): boolean => {
+    const normalized = String(question || '').toLowerCase();
+    if (!normalized) return false;
+    if (hasFormulationContext) return true;
+    return /\b(my|current|latest|today|recent|show|list|summary|average|how many|inventory|batch|batches|expense|expenses|revenue|sales|cost per kg|quality match|compliance|unlocked|mixes|formulations|daily logs|water quality|fcr)\b/.test(normalized);
+};
+
+const isInScopeDomainQuestion = (
+    question: string,
+    feedType?: 'fish' | 'poultry',
+    stageCode?: string
+): boolean => {
+    const normalized = String(question || '').toLowerCase();
+    if (!normalized) return false;
+    if (feedType || stageCode) return true;
+    if (isAppHelpQuestion(question)) return true;
+    return /\b(feed|feeding|fish|fishes|catfish|poultry|broiler|layer|farm|farming|pond|tank|ingredient|ingredients|nutrient|nutrients|protein|energy|fiber|lysine|methionine|pellet|premix|maize|soybean|fishmeal|formulation|formula|mix|care|take care|water quality|oxygen|mortality|growth|fcr|inventory|batch|stock|expense|revenue|cost|compliance|quality match|ration)\b/.test(normalized);
+};
+
+const classifyAnalystQuestion = ({
+    question,
+    feedType,
+    stageCode,
+    hasUnlockedFormulationContext
+}: {
+    question: string;
+    feedType?: 'fish' | 'poultry';
+    stageCode?: string;
+    hasUnlockedFormulationContext: boolean;
+}): AiQuestionClassification => {
+    const greeting = isGreetingQuestion(question);
+    const scopeOverview = isScopeOverviewQuestion(question);
+    const exactFormulation = isExactFormulationRequest(question);
+    const systemGrounded = isSystemGroundedQuestion(question, hasUnlockedFormulationContext);
+    const inScope = isInScopeDomainQuestion(question, feedType, stageCode);
+
+    if (exactFormulation && !hasUnlockedFormulationContext) {
+        return {
+            type: 'blocked_formulation_generation',
+            policyStatus: 'blocked',
+            policyReason: 'paid_formulation_required',
+            groundingMode: 'advisory',
+            isGreeting: false
+        };
+    }
+
+    if (scopeOverview) {
+        return {
+            type: 'general_in_scope_chat',
+            policyStatus: 'allowed',
+            policyReason: null,
+            groundingMode: 'general',
+            isGreeting: greeting
+        };
+    }
+
+    if (!inScope) {
+        return {
+            type: 'out_of_domain',
+            policyStatus: 'out_of_scope',
+            policyReason: 'out_of_domain',
+            groundingMode: 'general',
+            isGreeting: greeting
+        };
+    }
+
+    if (systemGrounded) {
+        return {
+            type: 'system_grounded_query',
+            policyStatus: 'allowed',
+            policyReason: null,
+            groundingMode: hasUnlockedFormulationContext ? 'deterministic_formulation' : 'system_verified',
+            isGreeting: greeting
+        };
+    }
+
+    if (isFormulationGuidanceQuestion(question) || feedType || stageCode) {
+        return {
+            type: 'advisory_formulation_guidance',
+            policyStatus: 'allowed',
+            policyReason: null,
+            groundingMode: 'advisory',
+            isGreeting: greeting
+        };
+    }
+
+    return {
+        type: 'general_in_scope_chat',
+        policyStatus: 'allowed',
+        policyReason: null,
+        groundingMode: 'general',
+        isGreeting: greeting
+    };
+};
+
+const summarizeScopeExamples = () => [
+    'Ask about feed guidance for fish or poultry stages.',
+    'Ask about ingredient roles, nutrient targets, or feed quality.',
+    'Ask about farm operations like batches, inventory, costs, or water quality.',
+    'Ask how to use AquaFeed features like formulation, unlock, wallet, or dashboard.'
+];
+
+const buildScopeRedirectResponse = ({
+    greeting,
+    policyStatus
+}: {
+    greeting: boolean;
+    policyStatus: 'allowed' | 'out_of_scope';
+}): { payload: AiAnalystResponse; meta: Record<string, unknown> } => {
+    const opening = policyStatus === 'out_of_scope'
+        ? (greeting ? 'Hello.' : 'That topic is outside this assistant’s scope.')
+        : (greeting ? 'Hello.' : 'Here is what I can help with.');
+    const examples = summarizeScopeExamples();
+    const answer = [
+        opening,
+        '',
+        'I’m here for feed guidance, fish and poultry management, farm operations, and AquaFeed app help.',
+        '',
+        'You can ask things like:',
+        ...examples.map((item) => `- ${item}`)
+    ].join('\n');
+
+    return {
+        payload: {
+            answer,
+            answerMarkdown: answer,
+            answerContent: answer,
+            thoughtProcess: null,
+            rawContent: answer,
+            citations: [],
+            numericClaims: [],
+            sources: [],
+            responseBlocks: [
+                {
+                    type: 'summary',
+                    title: policyStatus === 'out_of_scope' ? 'Supported Topics' : 'What I Help With',
+                    content: 'This assistant focuses on feed, farm, fish, poultry, and AquaFeed app support.'
+                },
+                {
+                    type: 'actions',
+                    title: 'Try One Of These',
+                    rows: examples.map((item) => ({ action: item }))
+                }
+            ],
+            followUpPrompts: [
+                'What feed guidance can you give for fingerlings?',
+                'How can I reduce feed cost without hurting quality?',
+                'What can you help me do inside AquaFeed?'
+            ],
+            confidence: 0.98,
+            reasoningSummary: null,
+            toolTrace: [
+                {
+                    type: 'policy',
+                    name: 'question_classifier',
+                    status: 'success',
+                    result: {
+                        policyStatus,
+                        redirect: 'supported_topics'
+                    }
+                }
+            ],
+            verificationStatus: 'not_applicable',
+            fallbackMessage: null,
+            policyStatus,
+            policyReason: policyStatus === 'out_of_scope' ? 'out_of_domain' : null,
+            redirectTarget: {
+                type: policyStatus === 'out_of_scope' ? 'supported_topics' : 'none'
+            },
+            groundingMode: 'general'
+        },
+        meta: {
+            modelUsed: 'policy-guardrail',
+            estimatedCostUsd: 0,
+            estimatedCostNgn: 0,
+            pricingSource: 'unknown',
+            interactionLatencyMs: 0
+        }
+    };
+};
+
+const stripPotentiallyUnverifiedNumericLines = (text: string): string => {
+    const filtered = String(text || '')
+        .split('\n')
+        .filter((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return true;
+            if (/[₦$€£]\s*\d/.test(trimmed)) return false;
+            if (/\b(NGN|USD|EUR|GBP|kg|g|%|kcal\/kg)\b/i.test(trimmed) && /\d/.test(trimmed)) return false;
+            if (/^[\-\*\d.]+\s+/.test(trimmed) && /\d/.test(trimmed)) return false;
+            if (/\d/.test(trimmed) && /\b(cost|price|protein|fat|fiber|energy|quality|compliance|inventory|revenue|expense|total|average|target|actual|delta)\b/i.test(trimmed)) {
+                return false;
+            }
+            return true;
+        })
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    return filtered;
+};
+
+const formatNutrientRange = (nutrient: string, range?: { min?: number; max?: number }): string | null => {
+    if (!range) return null;
+    const min = Number(range.min);
+    const max = Number(range.max);
+    const unit = nutrient === 'energy' ? 'kcal/kg' : '%';
+    if (Number.isFinite(min) && Number.isFinite(max)) return `${min}-${max} ${unit}`;
+    if (Number.isFinite(min)) return `${min} ${unit} minimum`;
+    if (Number.isFinite(max)) return `${max} ${unit} maximum`;
+    return null;
+};
+
+const buildTypicalIngredientList = (ingredientNames: string[]): string[] => {
+    const unique = Array.from(new Set(ingredientNames.map((item) => String(item || '').trim()).filter(Boolean)));
+    return unique.slice(0, 6);
 };
 
 const resolveBestMixOption = (
@@ -821,6 +1185,207 @@ const resolveBestMixOption = (
         ))[0];
 };
 
+const runStageGuidanceOrchestration = async ({
+    userId,
+    question,
+    formulationId,
+    feedType,
+    stageCode
+}: {
+    userId: string;
+    question: string;
+    formulationId?: string;
+    feedType?: 'fish' | 'poultry';
+    stageCode?: string;
+}): Promise<{ payload: AiAnalystResponse; meta: Record<string, unknown> } | null> => {
+    if (formulationId) return null;
+    if (!feedType || !stageCode) return null;
+    if (!isFormulationGuidanceQuestion(question)) return null;
+
+    const feedCategory = feedType === 'poultry' ? 'Poultry' : 'Catfish';
+    const standard = await FeedStandard.findOne({
+        feedCategory,
+        stageCode,
+        isActive: true
+    }).lean();
+    if (!standard) return null;
+
+    let typicalIngredients: string[] = [];
+    if (Types.ObjectId.isValid(userId)) {
+        const sampleRows = await Formulation.find({
+            userId: new Types.ObjectId(userId),
+            isUnlocked: true
+        })
+            .select('ingredientsUsed standardUsed')
+            .populate('standardUsed', 'feedCategory stageCode stage')
+            .sort({ createdAt: -1 })
+            .limit(15)
+            .lean();
+
+        const matched = sampleRows.filter((row: any) => {
+            const rowStandard = row.standardUsed || {};
+            const rowFeedType = String(rowStandard.feedCategory || '').toLowerCase() === 'poultry' ? 'poultry' : 'fish';
+            const rowStageCode = resolveCanonicalStageCode(String(rowStandard.stageCode || ''), {
+                feedType: rowFeedType as 'fish' | 'poultry',
+                stageLabel: rowStandard.stage
+            });
+            return rowFeedType === feedType && rowStageCode === stageCode;
+        });
+
+        const names = matched.flatMap((row: any) => (
+            Array.isArray(row.ingredientsUsed) ? row.ingredientsUsed.map((item: any) => String(item.name || '')) : []
+        ));
+        typicalIngredients = buildTypicalIngredientList(names);
+    }
+
+    const targets = standard.targetNutrients || {};
+    const targetRows = [
+        { metric: 'Protein', value: formatNutrientRange('protein', targets.protein) },
+        { metric: 'Fat', value: formatNutrientRange('fat', targets.fat) },
+        { metric: 'Fiber', value: formatNutrientRange('fiber', targets.fiber) },
+        { metric: 'Energy', value: formatNutrientRange('energy', targets.energy) },
+        { metric: 'Lysine', value: formatNutrientRange('lysine', targets.lysine) },
+        { metric: 'Methionine', value: formatNutrientRange('methionine', targets.methionine) }
+    ].filter((row) => row.value);
+
+    const ingredientHints = typicalIngredients.length > 0
+        ? typicalIngredients
+        : (
+            feedType === 'fish'
+                ? ['soybean meal', 'fish meal', 'maize', 'wheat offal', 'palm oil', 'premix']
+                : ['maize', 'soybean meal', 'groundnut cake', 'wheat offal', 'premix', 'limestone']
+        );
+
+    const answerLines = [
+        `For ${String(standard.stage || stageCode).trim()}, use this as a proper starting feed direction.`,
+        '',
+        `Feed type: ${feedType}`,
+        `Stage code: ${stageCode}`,
+        ...(standard.ageGuidance ? [`Age guide: ${standard.ageGuidance}`] : []),
+        ...(standard.pelletSize ? [`Pellet size: ${standard.pelletSize}`] : []),
+        '',
+        'Target nutrient profile:',
+        ...targetRows.map((row) => `- ${row.metric}: ${row.value}`),
+        '',
+        `Typical ingredient base: ${ingredientHints.join(', ')}`,
+        '',
+        'Practical approach:',
+        '1. Build protein first, then balance energy, then control fiber.',
+        '2. Keep premix/mineral support in place instead of cutting them for cost.',
+        '3. Use the formulation workflow when you need an exact paid mix output.'
+    ];
+
+    const numericClaims: NumericClaim[] = [];
+    if (Number.isFinite(Number(targets.protein?.min))) {
+        numericClaims.push({
+            label: 'Protein target min',
+            value: Number(targets.protein?.min),
+            unit: '%',
+            factId: 'target.protein.min'
+        });
+    }
+    if (Number.isFinite(Number(targets.protein?.max))) {
+        numericClaims.push({
+            label: 'Protein target max',
+            value: Number(targets.protein?.max),
+            unit: '%',
+            factId: 'target.protein.max'
+        });
+    }
+    if (Number.isFinite(Number(targets.energy?.min))) {
+        numericClaims.push({
+            label: 'Energy target min',
+            value: Number(targets.energy?.min),
+            unit: 'kcal/kg',
+            factId: 'target.energy.min'
+        });
+    }
+
+    const toolTrace = [
+        {
+            type: 'tool_call',
+            name: 'stage_guidance_orchestrator',
+            status: 'success',
+            arguments: {
+                feedType,
+                stageCode
+            },
+            result: {
+                standardName: String(standard.name || standard.stage || stageCode),
+                typicalIngredientCount: ingredientHints.length
+            }
+        }
+    ];
+
+    const answer = answerLines.join('\n');
+    return {
+        payload: {
+            answer,
+            answerMarkdown: answer,
+            answerContent: answer,
+            rawContent: answer,
+            thoughtProcess: null,
+            citations: numericClaims.map((claim) => claim.factId),
+            numericClaims,
+            sources: [
+                {
+                    type: 'feed_standard',
+                    title: String(standard.name || standard.stage || stageCode),
+                    reference: `Active ${feedCategory} standard`
+                },
+                ...(typicalIngredients.length > 0 ? [{
+                    type: 'historical_formulations',
+                    title: 'Recent unlocked mixes',
+                    reference: 'Matched by feed type and stage code'
+                }] : [])
+            ],
+            responseBlocks: [
+                {
+                    type: 'summary',
+                    title: 'Stage Guidance',
+                    content: `Use the active ${feedCategory.toLowerCase()} standard for ${String(standard.stage || stageCode).trim()} as the target profile.`
+                },
+                {
+                    type: 'numbers_table',
+                    title: 'Target Nutrients',
+                    rows: targetRows
+                },
+                {
+                    type: 'actions',
+                    title: 'Next Step',
+                    rows: [
+                        { action: `Use ingredients like ${ingredientHints.slice(0, 4).join(', ')} as your starting base.` },
+                        { action: 'Open the formulation workflow if you need an exact paid mix output.' }
+                    ]
+                }
+            ],
+            followUpPrompts: [
+                `What nutrient targets matter most for ${stageCode}?`,
+                `What ingredients are usually suitable for ${stageCode}?`,
+                'How do I reduce cost without hurting protein?'
+            ],
+            confidence: 0.9,
+            reasoningSummary: 'Used active feed standard and recent unlocked formulations for the same stage to build a practical starting answer.',
+            toolTrace,
+            verificationStatus: 'passed',
+            fallbackMessage: null,
+            policyStatus: 'allowed',
+            policyReason: null,
+            redirectTarget: {
+                type: 'none'
+            },
+            groundingMode: 'system_verified'
+        },
+        meta: {
+            modelUsed: 'deterministic-stage-guidance',
+            estimatedCostUsd: 0,
+            estimatedCostNgn: 0,
+            pricingSource: 'unknown',
+            interactionLatencyMs: 0
+        }
+    };
+};
+
 const runBestMixOrchestration = async ({
     userId,
     question,
@@ -836,101 +1401,13 @@ const runBestMixOrchestration = async ({
 }): Promise<{ payload: AiAnalystResponse; meta: Record<string, unknown> } | null> => {
     const intent = detectMixIntentType(question);
     if (!intent) return null;
+    if (!formulationId) return null;
 
     const startedAt = Date.now();
-    let formulation: any = null;
-    if (formulationId) {
-        formulation = await getFormulationWithStandardForUser(formulationId, userId);
-    } else if (Types.ObjectId.isValid(userId)) {
-        const query: Record<string, unknown> = {
-            userId: new Types.ObjectId(userId),
-            isUnlocked: true
-        };
-        formulation = await Formulation.findOne(query)
-            .populate('standardUsed', 'feedCategory stage stageCode targetNutrients tolerance')
-            .sort({ createdAt: -1 })
-            .lean();
-    }
+    const formulation = await getFormulationWithStandardForUser(formulationId, userId);
+    if (!formulation || formulation.isUnlocked !== true) return null;
 
-    if (!formulation) {
-        const missingResponse = [
-            'I can generate a full best formulation, but I need core inputs first.',
-            '',
-            'Please send:',
-            '1. Feed type (fish or poultry)',
-            '2. Stage (for example: FISH_CATFISH_4MM_GROW_OUT or BROILER_STARTER)',
-            '3. Target batch weight (kg)',
-            '4. Ingredient prices you currently buy at',
-            '',
-            'Then I will return ingredient %, kg, nutrient compliance, and cost per kg.'
-        ].join('\n');
-        return {
-            payload: {
-                answer: missingResponse,
-                answerMarkdown: missingResponse,
-                answerContent: missingResponse,
-                rawContent: missingResponse,
-                thoughtProcess: null,
-                citations: [],
-                numericClaims: [],
-                sources: [
-                    {
-                        type: 'tool_guardrail',
-                        title: 'Missing required formulation context',
-                        reference: 'Need formulation context to compute best mix deterministically'
-                    }
-                ],
-                responseBlocks: [
-                    {
-                        type: 'warnings',
-                        title: 'Missing Inputs',
-                        content: 'Best-formulation toolchain needs feed type, stage, target batch weight, and ingredient prices.'
-                    },
-                    {
-                        type: 'actions',
-                        title: 'Provide These Inputs',
-                        rows: [
-                            { action: 'Feed type + stage code' },
-                            { action: 'Target batch weight + ingredient prices' }
-                        ]
-                    }
-                ],
-                followUpPrompts: [
-                    'What inputs do you need to generate a best formulation?',
-                    'Generate fish 4mm grow-out formulation for 100kg batch',
-                    'Generate poultry broiler starter formulation for 50kg batch'
-                ],
-                confidence: 0.6,
-                reasoningSummary: 'Best-mix analysis was blocked because no formulation context was available.',
-                toolTrace: [
-                    {
-                        type: 'tool_call',
-                        name: 'best_mix_orchestrator',
-                        status: 'blocked',
-                        arguments: {
-                            feedType: feedType || null,
-                            stageCode: stageCode || null,
-                            hasFormulationId: Boolean(formulationId)
-                        },
-                        result: {
-                            reason: 'missing_context'
-                        }
-                    }
-                ],
-                verificationStatus: 'passed',
-                fallbackMessage: null
-            },
-            meta: {
-                modelUsed: 'deterministic-formulation-toolchain',
-                estimatedCostUsd: 0,
-                estimatedCostNgn: 0,
-                pricingSource: 'unknown',
-                interactionLatencyMs: Date.now() - startedAt
-            }
-        };
-    }
-
-    const standard = formulation.standardUsed || {};
+    const standard = (formulation.standardUsed || {}) as any;
     const normalizedFeedType = String(standard.feedCategory || '').toLowerCase() === 'poultry'
         ? 'poultry'
         : 'fish';
@@ -1083,15 +1560,21 @@ const runBestMixOrchestration = async ({
                 }
             ],
             followUpPrompts: [
-                'How can I make this formulation cheaper without losing compliance?',
-                'Which ingredient swap should I try first?',
-                'How can I improve protein while keeping cost under control?'
+                'How can I make this unlocked formulation cheaper without losing compliance?',
+                'Which ingredient swap should I try first in this unlocked mix?',
+                'How can I improve protein while keeping this mix under control?'
             ],
             confidence: 0.98,
             reasoningSummary: `Selected ${String(selectedOption.strategy || 'LEAST_COST')} strategy from computed formulation options and assembled ingredient/nutrient tables from stored solver outputs.`,
             toolTrace,
             verificationStatus: 'passed',
-            fallbackMessage: null
+            fallbackMessage: null,
+            policyStatus: 'allowed',
+            policyReason: null,
+            redirectTarget: {
+                type: 'none'
+            },
+            groundingMode: 'deterministic_formulation'
         },
         meta: {
             modelUsed: 'deterministic-formulation-toolchain',
@@ -1124,100 +1607,386 @@ const runAnalystQuery = async ({
         throw Object.assign(new Error('AI formulation analyst is currently disabled by admin settings'), { statusCode: 503 });
     }
 
-    let factPack: { facts: Record<string, { label: string; value: number | string; unit?: string }>; context: string };
-    const hasFormulationContext = Boolean(formulationId);
-    let fallbackMessage = '';
+    const startedAt = Date.now();
+    const inferredContext = inferAiContextFromQuestion(question, feedType, stageCode);
+    const resolvedFeedType = inferredContext.feedType;
+    const resolvedStageCode = inferredContext.stageCode;
+    let formulationRecord: any = null;
     if (formulationId) {
-        const formulation = await getFormulationWithStandardForUser(formulationId, userId);
-        if (!formulation) {
+        formulationRecord = await getFormulationWithStandardForUser(formulationId, userId);
+        if (!formulationRecord) {
             throw Object.assign(new Error('Formulation not found'), { statusCode: 404 });
         }
-        const ledger = buildCalculationLedger(formulation);
-        factPack = buildFactPack(ledger);
-        fallbackMessage = buildFallbackMessage(ledger);
-    } else {
-        factPack = await buildGlobalFactPack(userId, feedType, stageCode);
-        fallbackMessage = buildGlobalFallbackMessage(factPack.facts);
     }
 
-    const adaptiveHistoryLimit = question.length > 220 ? 12 : (question.length > 120 ? 8 : 6);
-    const hybrid = await buildHybridFarmContext(userId, threadId, adaptiveHistoryLimit);
-    const mergedFacts = {
-        ...factPack.facts,
-        ...hybrid.facts
+    const hasFormulationContext = Boolean(formulationId);
+    const hasUnlockedFormulationContext = Boolean(formulationRecord?.isUnlocked === true);
+    const classification = classifyAnalystQuestion({
+        question,
+        feedType: resolvedFeedType,
+        stageCode: resolvedStageCode,
+        hasUnlockedFormulationContext
+    });
+    const emptyHybrid = {
+        facts: {} as Record<string, { label: string; value: number | string; unit?: string }>,
+        contextLines: [] as string[],
+        sources: [] as AiSource[],
+        retrievalSummary: {
+            sourceCount: 0,
+            internalFactsCount: 0,
+            knowledgeChunkCount: 0
+        }
     };
-    const mergedSources: AiSource[] = [
-        ...hybrid.sources
-    ];
 
-    const instruction = kind === 'what_if'
-        ? 'You are AquaFeed Senior Analyst for day-to-day farmers. Use supplied facts first, then practical farm reasoning. Keep language simple. Never invent numbers.'
-        : 'You are AquaFeed Senior Analyst for day-to-day farmers. Use supplied facts first, then practical farm reasoning. Keep language simple. Never invent numbers.';
-
-    const systemPrompt = [
-        instruction,
-        'Return strict JSON with keys: answer, answerMarkdown, citations, numericClaims, responseBlocks, sources, followUpPrompts, confidence, reasoningSummary, toolTrace.',
-        'responseBlocks is array with item shape: {type,title,content,rows?}.',
-        'numericClaims must be array of {label,value,unit,factId}.',
-        'toolTrace is array of {type,name,status,arguments?,result?}.',
-        'confidence must be from 0 to 1.',
-        'reasoningSummary must be concise and user-safe (no chain-of-thought).',
-        'If unsure, keep numericClaims empty.'
-    ].join('\n');
-
-    const userPrompt = [
-        `Question: ${question}`,
-        '',
-        'Fact context:',
-        factPack.context,
-        '',
-        'Additional farm context:',
-        hybrid.contextLines.join('\n'),
-        '',
-        'Facts JSON:',
-        JSON.stringify(mergedFacts)
-    ].join('\n');
-
-    const startedAt = Date.now();
+    let factPack: { facts: Record<string, { label: string; value: number | string; unit?: string }>; context: string } = {
+        facts: {},
+        context: ''
+    };
+    let hybrid = emptyHybrid;
+    let mergedFacts: Record<string, { label: string; value: number | string; unit?: string }> = {};
+    let mergedSources: AiSource[] = [];
+    let fallbackMessage = '';
     console.info('[AI][run] start', {
         requestId: requestId || null,
         jobId: jobId || null,
         userId,
         kind,
-        feedType: feedType || null,
-        stageCode: stageCode || null,
+        feedType: resolvedFeedType || null,
+        stageCode: resolvedStageCode || null,
         hasFormulationContext,
+        hasUnlockedFormulationContext,
+        classification: classification.type,
+        policyStatus: classification.policyStatus,
         modelId: modelId || null,
         maxTokens: maxTokens || null,
         question: summarizeQuestion(question)
     });
+
+    const persistInteraction = async ({
+        status,
+        verificationStatus,
+        answer,
+        fallbackMessageValue,
+        citations,
+        numericClaims,
+        verificationErrors,
+        modelPrimary,
+        modelFallback,
+        modelUsed,
+        fallbackUsed,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        estimatedCostUsd,
+        pricingSource,
+        latencyMs,
+        attempts,
+        toolTrace
+    }: {
+        status: 'success' | 'fallback' | 'error';
+        verificationStatus: 'passed' | 'failed' | 'not_applicable';
+        answer: string;
+        fallbackMessageValue?: string;
+        citations: string[];
+        numericClaims: NumericClaim[];
+        verificationErrors: string[];
+        modelPrimary: string;
+        modelFallback: string;
+        modelUsed?: string;
+        fallbackUsed: boolean;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimatedCostUsd: number;
+        pricingSource: 'model_catalog' | 'config_estimate' | 'unknown';
+        latencyMs: number;
+        attempts: Array<{ model: string; latencyMs?: number; status: 'success' | 'failed'; errorMessage?: string }>;
+        toolTrace: Array<Record<string, unknown>>;
+    }) => {
+        await AiInteraction.create({
+            userId,
+            ...(threadId ? { threadId } : {}),
+            ...(formulationId ? { formulationId } : {}),
+            ...(jobId ? { jobId } : {}),
+            ...(requestId ? { requestId } : {}),
+            kind,
+            status,
+            verificationStatus,
+            prompt: question,
+            answer,
+            fallbackMessage: fallbackMessageValue,
+            citations,
+            numericClaims,
+            verificationErrors,
+            modelPrimary,
+            modelFallback,
+            ...(modelUsed ? { modelUsed } : {}),
+            fallbackUsed,
+            promptTokens,
+            completionTokens,
+            totalTokens,
+            estimatedCostUsd,
+            pricingSource,
+            latencyMs,
+            queueWaitMs: 0,
+            processingMs: latencyMs,
+            retrievalSummary: hybrid.retrievalSummary,
+            attempts,
+            ...(toolTrace.length > 0 ? { toolTrace } : {})
+        });
+    };
+
+    const buildPolicyTrace = (status: 'success' | 'blocked', extra?: Record<string, unknown>) => ({
+        type: 'policy',
+        name: 'question_classifier',
+        status,
+        result: {
+            classification: classification.type,
+            policyStatus: classification.policyStatus,
+            policyReason: classification.policyReason,
+            groundingMode: classification.groundingMode,
+            ...extra
+        }
+    });
+
     try {
+        if (classification.type === 'out_of_domain') {
+            const redirected = buildScopeRedirectResponse({
+                greeting: classification.isGreeting,
+                policyStatus: 'out_of_scope'
+            });
+            const payload = {
+                ...redirected.payload,
+                toolTrace: [buildPolicyTrace('blocked'), ...redirected.payload.toolTrace]
+            };
+            await persistInteraction({
+                status: 'success',
+                verificationStatus: 'not_applicable',
+                answer: payload.answerContent,
+                citations: [],
+                numericClaims: [],
+                verificationErrors: [],
+                modelPrimary: 'policy-guardrail',
+                modelFallback: 'policy-guardrail',
+                modelUsed: 'policy-guardrail',
+                fallbackUsed: false,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                estimatedCostUsd: 0,
+                pricingSource: 'unknown',
+                latencyMs: Date.now() - startedAt,
+                attempts: [{ model: 'policy-guardrail', latencyMs: Date.now() - startedAt, status: 'success' }],
+                toolTrace: payload.toolTrace
+            });
+            return {
+                payload,
+                meta: {
+                    ...redirected.meta,
+                    requestId: requestId || null,
+                    classification: classification.type,
+                    policyStatus: classification.policyStatus,
+                    groundingMode: classification.groundingMode
+                }
+            };
+        }
+
+        if (classification.type === 'general_in_scope_chat' && (classification.isGreeting || isScopeOverviewQuestion(question))) {
+            const scopeHelp = buildScopeRedirectResponse({
+                greeting: classification.isGreeting,
+                policyStatus: 'allowed'
+            });
+            const payload = {
+                ...scopeHelp.payload,
+                toolTrace: [buildPolicyTrace('success'), ...scopeHelp.payload.toolTrace]
+            };
+            await persistInteraction({
+                status: 'success',
+                verificationStatus: 'not_applicable',
+                answer: payload.answerContent,
+                citations: [],
+                numericClaims: [],
+                verificationErrors: [],
+                modelPrimary: 'policy-guardrail',
+                modelFallback: 'policy-guardrail',
+                modelUsed: 'policy-guardrail',
+                fallbackUsed: false,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                estimatedCostUsd: 0,
+                pricingSource: 'unknown',
+                latencyMs: Date.now() - startedAt,
+                attempts: [{ model: 'policy-guardrail', latencyMs: Date.now() - startedAt, status: 'success' }],
+                toolTrace: payload.toolTrace
+            });
+            return {
+                payload,
+                meta: {
+                    ...scopeHelp.meta,
+                    requestId: requestId || null,
+                    classification: classification.type,
+                    policyStatus: classification.policyStatus,
+                    groundingMode: classification.groundingMode
+                }
+            };
+        }
+
+        if (classification.type === 'blocked_formulation_generation') {
+            const stageGuidance = await runStageGuidanceOrchestration({
+                userId,
+                question,
+                feedType: resolvedFeedType,
+                stageCode: resolvedStageCode
+            });
+            const redirectTarget: AiRedirectTarget = formulationId
+                ? {
+                    type: 'unlock_formulation',
+                    formulationId
+                }
+                : {
+                    type: 'open_formulation'
+                };
+            const guidanceAnswer = stageGuidance?.payload.answerContent?.trim();
+            const answer = [
+                'Exact formulations and costed mix outputs are available only in the paid formulation workflow.',
+                'I can still help with feed guidance, nutrient targets, ingredient roles, and interpretation of unlocked mixes.',
+                guidanceAnswer ? `\nGuidance for this request:\n${guidanceAnswer}` : ''
+            ].filter(Boolean).join('\n\n');
+            const followUpPrompts = Array.from(new Set([
+                ...(stageGuidance?.payload.followUpPrompts || []).filter((prompt) => !isExactFormulationRequest(prompt)),
+                'What nutrient targets matter most for this stage?',
+                'How do I improve feed quality without requesting a recipe?',
+                'What can you guide me on before I open formulation?'
+            ])).slice(0, 3);
+            const payload: AiAnalystResponse = {
+                answer,
+                answerMarkdown: answer,
+                answerContent: answer,
+                thoughtProcess: null,
+                rawContent: answer,
+                citations: stageGuidance?.payload.citations || [],
+                numericClaims: stageGuidance?.payload.numericClaims || [],
+                sources: stageGuidance?.payload.sources || [],
+                responseBlocks: [
+                    {
+                        type: 'warnings',
+                        title: 'Exact Formulation Is Locked',
+                        content: 'Use the formulation screen or unlock a mix to get exact ingredient percentages, kg allocations, and costed outputs.'
+                    },
+                    ...((stageGuidance?.payload.responseBlocks || []).filter((block) => block.type !== 'actions')),
+                    {
+                        type: 'actions',
+                        title: 'What I Can Do Here',
+                        rows: [
+                            { action: 'Ask for nutrient targets, ingredient roles, or stage guidance.' },
+                            { action: 'Ask how to improve compliance or reduce cost without requesting an exact recipe.' },
+                            {
+                                action: redirectTarget.type === 'unlock_formulation'
+                                    ? 'Open the formulation screen to unlock this mix.'
+                                    : 'Open the formulation screen for an exact paid mix output.'
+                            }
+                        ]
+                    }
+                ],
+                followUpPrompts,
+                confidence: stageGuidance ? stageGuidance.payload.confidence : 0.9,
+                reasoningSummary: 'Detected an exact formulation-generation request without unlocked formulation access, so only guidance was returned.',
+                toolTrace: [
+                    buildPolicyTrace('blocked', { redirectTarget: redirectTarget.type }),
+                    ...((stageGuidance?.payload.toolTrace || []).filter(Boolean))
+                ],
+                verificationStatus: stageGuidance ? stageGuidance.payload.verificationStatus : 'not_applicable',
+                fallbackMessage: null,
+                policyStatus: 'blocked',
+                policyReason: 'paid_formulation_required',
+                redirectTarget,
+                groundingMode: stageGuidance?.payload.groundingMode || 'advisory'
+            };
+
+            await persistInteraction({
+                status: 'success',
+                verificationStatus: stageGuidance ? 'passed' : 'passed',
+                answer: payload.answerContent,
+                citations: payload.citations,
+                numericClaims: payload.numericClaims,
+                verificationErrors: [],
+                modelPrimary: stageGuidance ? 'deterministic-stage-guidance' : 'policy-guardrail',
+                modelFallback: stageGuidance ? 'deterministic-stage-guidance' : 'policy-guardrail',
+                modelUsed: stageGuidance ? 'deterministic-stage-guidance' : 'policy-guardrail',
+                fallbackUsed: false,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                estimatedCostUsd: 0,
+                pricingSource: 'unknown',
+                latencyMs: Date.now() - startedAt,
+                attempts: [
+                    {
+                        model: stageGuidance ? 'deterministic-stage-guidance' : 'policy-guardrail',
+                        latencyMs: Date.now() - startedAt,
+                        status: 'success'
+                    }
+                ],
+                toolTrace: payload.toolTrace
+            });
+
+            return {
+                payload,
+                meta: {
+                    requestId: requestId || null,
+                    modelUsed: stageGuidance ? 'deterministic-stage-guidance' : 'policy-guardrail',
+                    estimatedCostUsd: 0,
+                    estimatedCostNgn: 0,
+                    pricingSource: 'unknown',
+                    interactionLatencyMs: Date.now() - startedAt,
+                    classification: classification.type,
+                    policyStatus: payload.policyStatus,
+                    groundingMode: payload.groundingMode
+                }
+            };
+        }
+
+        if (classification.type !== 'general_in_scope_chat') {
+            if (formulationRecord) {
+                const ledger = buildCalculationLedger(formulationRecord);
+                factPack = buildFactPack(ledger);
+                fallbackMessage = buildFallbackMessage(ledger);
+            } else {
+                factPack = await buildGlobalFactPack(userId, resolvedFeedType, resolvedStageCode);
+                fallbackMessage = buildGlobalFallbackMessage(factPack.facts);
+            }
+
+            const adaptiveHistoryLimit = classification.type === 'system_grounded_query'
+                ? (question.length > 220 ? 10 : 8)
+                : 4;
+            hybrid = await buildHybridFarmContext(userId, threadId, adaptiveHistoryLimit);
+            mergedFacts = {
+                ...factPack.facts,
+                ...hybrid.facts
+            };
+            mergedSources = [...hybrid.sources];
+        }
+
         const orchestrated = await runBestMixOrchestration({
             userId,
             question,
             formulationId,
-            feedType,
-            stageCode
+            feedType: resolvedFeedType,
+            stageCode: resolvedStageCode
         });
 
         if (orchestrated) {
-            const deterministicToolTrace = Array.isArray(orchestrated.payload.toolTrace)
-                ? orchestrated.payload.toolTrace
-                : [];
-            await AiInteraction.create({
-                userId,
-                ...(threadId ? { threadId } : {}),
-                ...(formulationId ? { formulationId } : {}),
-                ...(jobId ? { jobId } : {}),
-                ...(requestId ? { requestId } : {}),
-                kind,
+            const payload = {
+                ...orchestrated.payload,
+                toolTrace: [buildPolicyTrace('success'), ...(Array.isArray(orchestrated.payload.toolTrace) ? orchestrated.payload.toolTrace : [])]
+            };
+            await persistInteraction({
                 status: 'success',
                 verificationStatus: 'passed',
-                prompt: question,
-                answer: orchestrated.payload.answerContent,
-                fallbackMessage: undefined,
-                citations: orchestrated.payload.citations,
-                numericClaims: orchestrated.payload.numericClaims,
+                answer: payload.answerContent,
+                citations: payload.citations,
+                numericClaims: payload.numericClaims,
                 verificationErrors: [],
                 modelPrimary: 'deterministic-formulation-toolchain',
                 modelFallback: 'deterministic-formulation-toolchain',
@@ -1229,9 +1998,6 @@ const runAnalystQuery = async ({
                 estimatedCostUsd: 0,
                 pricingSource: 'unknown',
                 latencyMs: Date.now() - startedAt,
-                queueWaitMs: 0,
-                processingMs: Date.now() - startedAt,
-                retrievalSummary: hybrid.retrievalSummary,
                 attempts: [
                     {
                         model: 'deterministic-formulation-toolchain',
@@ -1239,21 +2005,116 @@ const runAnalystQuery = async ({
                         status: 'success'
                     }
                 ],
-                ...(deterministicToolTrace.length > 0 ? { toolTrace: deterministicToolTrace } : {})
+                toolTrace: payload.toolTrace
             });
 
             return {
-                payload: orchestrated.payload,
+                payload,
                 meta: {
                     ...orchestrated.meta,
-                    requestId: requestId || null
+                    requestId: requestId || null,
+                    classification: classification.type,
+                    policyStatus: payload.policyStatus,
+                    groundingMode: payload.groundingMode
+                }
+            };
+        }
+
+        const stageGuidance = await runStageGuidanceOrchestration({
+            userId,
+            question,
+            formulationId,
+            feedType: resolvedFeedType,
+            stageCode: resolvedStageCode
+        });
+
+        if (stageGuidance) {
+            const payload = {
+                ...stageGuidance.payload,
+                toolTrace: [buildPolicyTrace('success'), ...(Array.isArray(stageGuidance.payload.toolTrace) ? stageGuidance.payload.toolTrace : [])]
+            };
+            await persistInteraction({
+                status: 'success',
+                verificationStatus: 'passed',
+                answer: payload.answerContent,
+                citations: payload.citations,
+                numericClaims: payload.numericClaims,
+                verificationErrors: [],
+                modelPrimary: 'deterministic-stage-guidance',
+                modelFallback: 'deterministic-stage-guidance',
+                modelUsed: 'deterministic-stage-guidance',
+                fallbackUsed: false,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                estimatedCostUsd: 0,
+                pricingSource: 'unknown',
+                latencyMs: Date.now() - startedAt,
+                attempts: [
+                    {
+                        model: 'deterministic-stage-guidance',
+                        latencyMs: Date.now() - startedAt,
+                        status: 'success'
+                    }
+                ],
+                toolTrace: payload.toolTrace
+            });
+
+            return {
+                payload,
+                meta: {
+                    ...stageGuidance.meta,
+                    requestId: requestId || null,
+                    classification: classification.type,
+                    policyStatus: payload.policyStatus,
+                    groundingMode: payload.groundingMode
                 }
             };
         }
 
         const adaptiveMaxTokens = maxTokens && maxTokens > 0
             ? maxTokens
-            : Math.min(3200, Math.max(1200, (question.length * 4) + (hasFormulationContext ? 900 : 700)));
+            : (
+                classification.type === 'system_grounded_query'
+                    ? (hasUnlockedFormulationContext ? 1600 : 1400)
+                    : classification.type === 'advisory_formulation_guidance'
+                    ? 1100
+                    : 850
+            );
+        const instruction = 'You are AquaFeed Senior Analyst for day-to-day farmers. Keep language plain and practical. Never invent system numbers. Stay within feed guidance, fish and poultry management, farm operations, and AquaFeed app support.';
+        const systemPrompt = [
+            instruction,
+            `Question classification: ${classification.type}`,
+            `Grounding mode: ${classification.groundingMode}`,
+            `Unlocked formulation context: ${hasUnlockedFormulationContext ? 'yes' : 'no'}`,
+            'Do not provide exact formulations, ingredient percentages, kg allocations, or costed recipe outputs unless unlocked formulation context is explicitly available.',
+            'If the user goes outside supported topics, redirect briefly to feed, farm, fish, poultry, or app-help topics.',
+            'Return strict JSON with keys: answer, answerMarkdown, citations, numericClaims, responseBlocks, sources, followUpPrompts, confidence, reasoningSummary, toolTrace.',
+            'responseBlocks is array with item shape: {type,title,content,rows?}.',
+            'citations must contain exact fact ids from Facts JSON only. If unsure, keep citations empty.',
+            'numericClaims must be array of {label,value,unit,factId}.',
+            'toolTrace is array of {type,name,status,arguments?,result?}.',
+            'confidence must be from 0 to 1.',
+            'reasoningSummary must be concise and user-safe (no chain-of-thought).',
+            'If unsure, keep numericClaims empty.'
+        ].join('\n');
+        const userPromptSections = [
+            `Question: ${question}`,
+            '',
+            `Resolved feed type: ${resolvedFeedType || 'unknown'}`,
+            `Resolved stage code: ${resolvedStageCode || 'unknown'}`
+        ];
+        if (factPack.context.trim()) {
+            userPromptSections.push('', 'Fact context:', factPack.context);
+        }
+        if (hybrid.contextLines.length > 0) {
+            userPromptSections.push('', 'Additional farm context:', hybrid.contextLines.join('\n'));
+        }
+        if (Object.keys(mergedFacts).length > 0) {
+            userPromptSections.push('', 'Facts JSON:', JSON.stringify(mergedFacts));
+        }
+        const userPrompt = userPromptSections.join('\n');
+
         const llm = await openRouterService.chatJson({
             messages: [
                 { role: 'system', content: systemPrompt },
@@ -1267,64 +2128,94 @@ const runAnalystQuery = async ({
         const rawAnswerMarkdown = String(llm.parsedJson.answerMarkdown || rawAnswer).trim() || rawAnswer;
         const extracted = extractThoughtProcess(rawAnswerMarkdown || rawAnswer);
         const answerContent = extracted.answerContent || stripReasoningArtifacts(rawAnswerMarkdown || rawAnswer);
-        const answerMarkdown = answerContent;
-        const answer = answerContent;
         const citationsRaw = llm.parsedJson.citations;
         const citations = Array.isArray(citationsRaw)
             ? citationsRaw.map((item) => String(item)).filter(Boolean)
             : [];
         const numericClaims = normalizeClaims(llm.parsedJson.numericClaims);
-        const verification = verifyClaims(numericClaims, citations, mergedFacts);
-        const verifiedFallbackMessage = verification.passed ? null : fallbackMessage;
+        const verificationApplicable = classification.groundingMode === 'system_verified'
+            || classification.groundingMode === 'deterministic_formulation'
+            || numericClaims.length > 0
+            || citations.length > 0;
+        const verification = verificationApplicable
+            ? verifyClaims(numericClaims, citations, mergedFacts)
+            : {
+                passed: true,
+                errors: [] as string[],
+                citationWarnings: [] as string[],
+                usableCitations: [] as string[],
+                verifiedClaims: [] as NumericClaim[],
+                rejectedClaims: [] as Array<{ claim: NumericClaim; reason: string }>
+            };
         const responseBlocks = normalizeResponseBlocks(llm.parsedJson.responseBlocks);
         const followUpPrompts = normalizeFollowUpPrompts(llm.parsedJson.followUpPrompts);
         const dynamicSources = normalizeSources(llm.parsedJson.sources);
         const parsedReasoningSummary = String(llm.parsedJson.reasoningSummary || '').trim() || null;
         const reasoningSummary = parsedReasoningSummary || extracted.thoughtProcess || null;
-        const confidence = clamp01(Number(llm.parsedJson.confidence ?? (verification.passed ? 0.84 : 0.5)));
-        const normalizedToolTrace = Array.isArray(llm.parsedJson.toolTrace)
+        const confidence = clamp01(Number(llm.parsedJson.confidence ?? (verificationApplicable ? 0.84 : 0.7)));
+        const llmToolTrace = Array.isArray(llm.parsedJson.toolTrace)
             ? llm.parsedJson.toolTrace
                 .filter((entry) => entry && typeof entry === 'object')
                 .map((entry) => entry as Record<string, unknown>)
             : [];
-        const safeBlocks = verification.passed
-            ? (
-                responseBlocks.length > 0
-                    ? responseBlocks
-                    : ([
-                        {
-                            type: 'summary' as const,
-                            title: 'Assistant Summary',
-                            content: answer
-                        }
-                    ] as AiResponseBlock[])
-            )
-            : buildVerifiedFallbackBlocks(fallbackMessage, factPack.facts, hasFormulationContext);
-        const verifiedGuidance = verification.passed
-            ? []
-            : buildVerifiedGuidance(factPack.facts, hasFormulationContext);
-        const safeFollowUps = verification.passed
-            ? followUpPrompts
-            : verifiedGuidance.slice(0, 3);
-        const safeCitations = verification.passed ? citations : [];
-        const safeNumericClaims = verification.passed ? numericClaims : [];
-        const safeSources = verification.passed
-            ? [...mergedSources, ...dynamicSources].slice(0, 12)
-            : mergedSources;
-        const fallbackNarrative = verification.passed
-            ? null
-            : [
+        const verifiedGuidance = buildVerifiedGuidance(factPack.facts, hasFormulationContext);
+        const numericSanitizedAnswer = verification.rejectedClaims.length > 0
+            ? stripPotentiallyUnverifiedNumericLines(answerContent)
+            : answerContent;
+        const keepSanitizedAnswer = numericSanitizedAnswer.trim().length >= Math.max(48, Math.floor(answerContent.length * 0.3));
+        const needsVerifiedFallback = classification.type === 'system_grounded_query'
+            && verification.rejectedClaims.length > 0
+            && !keepSanitizedAnswer;
+        const verifiedFallbackMessage = needsVerifiedFallback ? fallbackMessage : null;
+        const fallbackNarrative = needsVerifiedFallback
+            ? [
                 fallbackMessage,
                 '',
                 'Actionable guidance:',
                 ...verifiedGuidance.map((item, index) => `${index + 1}. ${item}`)
-            ].join('\n');
+            ].join('\n')
+            : null;
+        const finalAnswerContent = needsVerifiedFallback
+            ? (fallbackNarrative || fallbackMessage || answerContent)
+            : (
+                verification.rejectedClaims.length > 0
+                    ? (keepSanitizedAnswer ? numericSanitizedAnswer : answerContent)
+                    : answerContent
+            );
+        const filteredBlocks = verification.rejectedClaims.length > 0
+            ? responseBlocks.filter((block) => block.type !== 'numbers_table')
+            : responseBlocks;
+        const safeBlocks = needsVerifiedFallback
+            ? buildVerifiedFallbackBlocks(fallbackMessage, factPack.facts, hasFormulationContext)
+            : (
+                filteredBlocks.length > 0
+                    ? filteredBlocks
+                    : ([
+                        {
+                            type: 'summary' as const,
+                            title: 'Assistant Summary',
+                            content: finalAnswerContent
+                        }
+                    ] as AiResponseBlock[])
+            );
+        const safeFollowUps = (followUpPrompts.length > 0
+            ? followUpPrompts.filter((prompt) => !isExactFormulationRequest(prompt))
+            : verifiedGuidance).slice(0, 3);
+        const safeCitations = verificationApplicable && !needsVerifiedFallback ? verification.usableCitations : [];
+        const safeNumericClaims = verificationApplicable && !needsVerifiedFallback ? verification.verifiedClaims : [];
+        const safeSources = classification.groundingMode === 'general'
+            ? dynamicSources.slice(0, 6)
+            : [...mergedSources, ...dynamicSources].slice(0, 12);
+        const finalVerificationStatus: AiAnalystResponse['verificationStatus'] = needsVerifiedFallback
+            ? 'failed'
+            : (verificationApplicable ? 'passed' : 'not_applicable');
+        const normalizedToolTrace = [buildPolicyTrace('success'), ...llmToolTrace];
 
         const responsePayload: AiAnalystResponse = {
-            answer: verification.passed ? answer : (fallbackNarrative || fallbackMessage || answer),
-            answerMarkdown: verification.passed ? answerMarkdown : (fallbackNarrative || fallbackMessage || answerMarkdown),
-            answerContent: verification.passed ? answerContent : (fallbackNarrative || fallbackMessage || answerContent),
-            thoughtProcess: verification.passed ? extracted.thoughtProcess : null,
+            answer: finalAnswerContent,
+            answerMarkdown: finalAnswerContent,
+            answerContent: finalAnswerContent,
+            thoughtProcess: needsVerifiedFallback ? null : extracted.thoughtProcess,
             rawContent: extracted.rawContent || answerContent,
             citations: safeCitations,
             numericClaims: safeNumericClaims,
@@ -1334,38 +2225,34 @@ const runAnalystQuery = async ({
             confidence,
             reasoningSummary,
             toolTrace: normalizedToolTrace,
-            verificationStatus: verification.passed ? 'passed' : 'failed',
-            fallbackMessage: verifiedFallbackMessage
+            verificationStatus: finalVerificationStatus,
+            fallbackMessage: verifiedFallbackMessage,
+            policyStatus: classification.policyStatus,
+            policyReason: classification.policyReason,
+            redirectTarget: {
+                type: 'none'
+            },
+            groundingMode: classification.groundingMode
         };
 
-        await AiInteraction.create({
-            userId,
-            ...(threadId ? { threadId } : {}),
-            ...(formulationId ? { formulationId } : {}),
-            ...(jobId ? { jobId } : {}),
-            ...(requestId ? { requestId } : {}),
-            kind,
-            status: verification.passed ? 'success' : 'fallback',
-            verificationStatus: verification.passed ? 'passed' : 'failed',
-            prompt: question,
-            answer: answerContent,
-            fallbackMessage: verifiedFallbackMessage || undefined,
-            citations,
-            numericClaims,
+        await persistInteraction({
+            status: finalVerificationStatus === 'failed' ? 'fallback' : 'success',
+            verificationStatus: finalVerificationStatus === 'failed' ? 'failed' : 'passed',
+            answer: responsePayload.answerContent,
+            fallbackMessageValue: verifiedFallbackMessage || undefined,
+            citations: safeCitations,
+            numericClaims: safeNumericClaims,
             verificationErrors: verification.errors,
             modelPrimary: llm.modelPrimary,
             modelFallback: llm.modelFallback,
             modelUsed: llm.modelUsed,
-            fallbackUsed: llm.fallbackUsed || !verification.passed,
+            fallbackUsed: llm.fallbackUsed || finalVerificationStatus === 'failed',
             promptTokens: llm.usage.promptTokens,
             completionTokens: llm.usage.completionTokens,
             totalTokens: llm.usage.totalTokens,
             estimatedCostUsd: llm.estimatedCostUsd,
             pricingSource: llm.pricingSource,
             latencyMs: llm.latencyMs,
-            queueWaitMs: 0,
-            processingMs: llm.latencyMs,
-            retrievalSummary: hybrid.retrievalSummary,
             attempts: [
                 {
                     model: llm.modelUsed,
@@ -1373,9 +2260,9 @@ const runAnalystQuery = async ({
                     status: 'success'
                 }
             ],
-            ...(normalizedToolTrace.length > 0 ? { toolTrace: normalizedToolTrace } : {})
+            toolTrace: normalizedToolTrace
         });
-        if (!verification.passed) {
+        if (verification.rejectedClaims.length > 0 || verification.citationWarnings.length > 0) {
             console.warn('[AI][run] verification_failed', {
                 requestId: requestId || null,
                 jobId: jobId || null,
@@ -1384,6 +2271,8 @@ const runAnalystQuery = async ({
                 verificationErrorCount: verification.errors.length,
                 verificationErrors: verification.errors.slice(0, 6),
                 citationsCount: citations.length,
+                citationWarningCount: verification.citationWarnings.length,
+                citationWarnings: verification.citationWarnings.slice(0, 6),
                 numericClaimsCount: numericClaims.length
             });
         }
@@ -1394,8 +2283,12 @@ const runAnalystQuery = async ({
             requestId: requestId || null,
             jobId: jobId || null,
             userId,
+            classification: classification.type,
+            policyStatus: classification.policyStatus,
+            groundingMode: classification.groundingMode,
             modelUsed: llm.modelUsed,
-            fallbackUsed: !verification.passed || llm.fallbackUsed,
+            parseMode: llm.parseMode,
+            fallbackUsed: finalVerificationStatus === 'failed' || llm.fallbackUsed,
             verificationStatus: responsePayload.verificationStatus,
             totalTokens: llm.usage.totalTokens,
             latencyMs: llm.latencyMs,
@@ -1412,7 +2305,10 @@ const runAnalystQuery = async ({
                 estimatedCostNgn,
                 pricingSource: llm.pricingSource,
                 reasoningSummary,
-                budget
+                budget,
+                classification: classification.type,
+                policyStatus: classification.policyStatus,
+                groundingMode: classification.groundingMode
             }
         };
     } catch (error) {
@@ -1425,24 +2321,17 @@ const runAnalystQuery = async ({
             modelId: modelId || null,
             ...toErrorPayload(error)
         });
-        await AiInteraction.create({
-            userId,
-            ...(threadId ? { threadId } : {}),
-            ...(formulationId ? { formulationId } : {}),
-            ...(jobId ? { jobId } : {}),
-            ...(requestId ? { requestId } : {}),
-            kind,
+        await persistInteraction({
             status: 'error',
             verificationStatus: 'failed',
-            prompt: question,
             answer: '',
-            fallbackMessage,
+            fallbackMessageValue: fallbackMessage || undefined,
             citations: [],
             numericClaims: [],
             verificationErrors: [message],
             modelPrimary: process.env.OPENROUTER_PRIMARY_MODEL || 'meta-llama/llama-3.1-8b-instruct:free',
             modelFallback: process.env.OPENROUTER_FALLBACK_MODEL || 'openai/gpt-4o-mini',
-            ...(modelId ? { modelUsed: modelId } : {}),
+            modelUsed: modelId,
             fallbackUsed: true,
             promptTokens: 0,
             completionTokens: 0,
@@ -1450,9 +2339,6 @@ const runAnalystQuery = async ({
             estimatedCostUsd: 0,
             pricingSource: 'unknown',
             latencyMs: Date.now() - startedAt,
-            queueWaitMs: 0,
-            processingMs: Date.now() - startedAt,
-            retrievalSummary: hybrid.retrievalSummary,
             attempts: [
                 {
                     model: modelId || process.env.OPENROUTER_PRIMARY_MODEL || 'meta-llama/llama-3.1-8b-instruct:free',
@@ -1460,20 +2346,25 @@ const runAnalystQuery = async ({
                     errorMessage: message
                 }
             ],
-            errorMessage: message
+            toolTrace: [buildPolicyTrace('blocked', { error: message })]
         });
 
         const budget = await getBudgetSnapshot();
         const verifiedGuidance = buildVerifiedGuidance(factPack.facts, hasFormulationContext);
-        const intent = detectMixIntentType(question);
-        const providerFailureGuidance = (!hasFormulationContext && intent)
+        const providerFailureGuidance = classification.type === 'general_in_scope_chat'
             ? [
-                'AI model was temporarily unavailable, but I can still generate a strong formulation once inputs are provided.',
+                'AI is temporarily unavailable.',
                 '',
-                'Please send feed type, stage, target batch weight, and ingredient prices.'
+                'I’m here to help with feed guidance, fish and poultry management, farm operations, and AquaFeed app support.'
+            ].join('\n')
+            : classification.type === 'advisory_formulation_guidance'
+            ? [
+                'AI is temporarily unavailable, so I am keeping this reply on verified guidance only.',
+                '',
+                'I can still help with nutrient targets, ingredient roles, and stage guidance.'
             ].join('\n')
             : [
-                'AI model was temporarily unavailable. Here is a verified summary from your data.',
+                'AI is temporarily unavailable. Here is a verified summary from your data.',
                 '',
                 fallbackMessage
             ].join('\n');
@@ -1481,7 +2372,9 @@ const runAnalystQuery = async ({
             providerFailureGuidance,
             '',
             'What to send next:',
-            ...verifiedGuidance.map((item, index) => `${index + 1}. ${item}`)
+            ...(classification.type === 'general_in_scope_chat'
+                ? summarizeScopeExamples().slice(0, 3).map((item, index) => `${index + 1}. ${item}`)
+                : verifiedGuidance.map((item, index) => `${index + 1}. ${item}`))
         ].join('\n');
 
         return {
@@ -1498,11 +2391,22 @@ const runAnalystQuery = async ({
                 followUpPrompts: verifiedGuidance.slice(0, 3),
                 confidence: 0.25,
                 reasoningSummary: null,
-                toolTrace: [],
-                verificationStatus: 'failed',
-                fallbackMessage: fallbackMessage || null
+                toolTrace: [buildPolicyTrace('blocked', { providerFailure: true })],
+                verificationStatus: classification.type === 'general_in_scope_chat' ? 'not_applicable' : 'failed',
+                fallbackMessage: classification.type === 'general_in_scope_chat' ? null : (fallbackMessage || null),
+                policyStatus: classification.policyStatus,
+                policyReason: classification.policyReason,
+                redirectTarget: classification.type === 'general_in_scope_chat'
+                    ? { type: 'none' }
+                    : { type: 'supported_topics' },
+                groundingMode: classification.groundingMode
             },
-            meta: { budget }
+            meta: {
+                budget,
+                classification: classification.type,
+                policyStatus: classification.policyStatus,
+                groundingMode: classification.groundingMode
+            }
         };
     } finally {
         console.info('[AI][run] done', {
@@ -1775,6 +2679,10 @@ const mapMessageDoc = (doc: any) => ({
     jobId: doc.jobId ? String(doc.jobId) : null,
     verificationStatus: doc.verificationStatus || null,
     fallbackMessage: doc.fallbackMessage || null,
+    policyStatus: doc.policyStatus || 'allowed',
+    policyReason: doc.policyReason || null,
+    redirectTarget: doc.redirectTarget || { type: 'none' },
+    groundingMode: doc.groundingMode || 'general',
     toolTrace: doc.toolTrace || [],
     scenario: doc.scenario || null,
     createdAt: doc.createdAt,
@@ -2032,7 +2940,11 @@ const processAnalystJob = async (jobId: string) => {
             confidence: askResult.payload.confidence,
             reasoningSummary: askResult.payload.reasoningSummary || undefined,
             verificationStatus: askResult.payload.verificationStatus,
-            fallbackMessage: askResult.payload.fallbackMessage || undefined
+            fallbackMessage: askResult.payload.fallbackMessage || undefined,
+            policyStatus: askResult.payload.policyStatus,
+            ...(askResult.payload.policyReason ? { policyReason: askResult.payload.policyReason } : {}),
+            ...(askResult.payload.redirectTarget ? { redirectTarget: askResult.payload.redirectTarget } : {}),
+            groundingMode: askResult.payload.groundingMode
         });
 
         thread.lastMessageAt = assistantMessage.createdAt;
@@ -2139,6 +3051,10 @@ const mapGuideMessage = (
         base.detected_postcodes = null;
         base.verification_status = doc.verificationStatus || null;
         base.fallback_message = doc.fallbackMessage || null;
+        base.policy_status = doc.policyStatus || 'allowed';
+        base.policy_reason = doc.policyReason || null;
+        base.redirect_target = doc.redirectTarget || { type: 'none' };
+        base.grounding_mode = doc.groundingMode || 'general';
     }
 
     return base;
@@ -2179,7 +3095,11 @@ const createGuideAssistantMessage = async ({
         confidence: askResult.payload.confidence,
         reasoningSummary: askResult.payload.reasoningSummary || undefined,
         verificationStatus: askResult.payload.verificationStatus,
-        fallbackMessage: askResult.payload.fallbackMessage || undefined
+        fallbackMessage: askResult.payload.fallbackMessage || undefined,
+        policyStatus: askResult.payload.policyStatus,
+        ...(askResult.payload.policyReason ? { policyReason: askResult.payload.policyReason } : {}),
+        ...(askResult.payload.redirectTarget ? { redirectTarget: askResult.payload.redirectTarget } : {}),
+        groundingMode: askResult.payload.groundingMode
     })
 );
 
@@ -3128,7 +4048,11 @@ export const postFormulationAnalystThreadMessage = async (req: Request, res: Res
             confidence: askResult.payload.confidence,
             reasoningSummary: askResult.payload.reasoningSummary || undefined,
             verificationStatus: askResult.payload.verificationStatus,
-            fallbackMessage: askResult.payload.fallbackMessage || undefined
+            fallbackMessage: askResult.payload.fallbackMessage || undefined,
+            policyStatus: askResult.payload.policyStatus,
+            ...(askResult.payload.policyReason ? { policyReason: askResult.payload.policyReason } : {}),
+            ...(askResult.payload.redirectTarget ? { redirectTarget: askResult.payload.redirectTarget } : {}),
+            groundingMode: askResult.payload.groundingMode
         });
 
         if (thread.title === 'Formulation Assistant') {
@@ -3199,6 +4123,165 @@ export const postFormulationAnalystScenario = async (req: Request, res: Response
             hasFormulationId: Boolean(context.formulationId)
         });
 
+        const userScenarioText = formatScenarioLabel(scenarioType);
+        const buildLockedScenarioResponse = async ({
+            redirectTarget,
+            prompt,
+            toolResult
+        }: {
+            redirectTarget: AiRedirectTarget;
+            prompt: string;
+            toolResult: Record<string, unknown>;
+        }) => {
+            const userMessage = await AiMessage.create({
+                conversationId: threadObjectId,
+                userId: userObjectId,
+                requestId,
+                role: 'user',
+                text: userScenarioText
+            });
+
+            const assistantText = [
+                'Scenario simulations that reveal exact mix outputs are available only in the paid formulation workflow.',
+                prompt,
+                redirectTarget.type === 'unlock_formulation'
+                    ? 'Open the formulation screen to unlock this mix before running scenarios.'
+                    : 'Open the formulation screen and use an unlocked mix before running scenarios.'
+            ].join('\n\n');
+
+            const assistantMessage = await AiMessage.create({
+                conversationId: threadObjectId,
+                userId: userObjectId,
+                requestId,
+                role: 'assistant',
+                text: assistantText,
+                rawContent: assistantText,
+                answerContent: assistantText,
+                toolTrace: [
+                    {
+                        type: 'policy',
+                        name: 'scenario_guardrail',
+                        status: 'blocked',
+                        result: toolResult
+                    }
+                ],
+                verificationStatus: 'not_applicable',
+                policyStatus: 'blocked',
+                policyReason: 'paid_formulation_required',
+                redirectTarget,
+                groundingMode: 'advisory',
+                responseBlocks: [
+                    {
+                        type: 'warnings',
+                        title: 'Scenario Simulation Locked',
+                        content: 'Use the paid formulation workflow for exact scenario deltas and simulation outputs.'
+                    },
+                    {
+                        type: 'actions',
+                        title: 'What You Can Do Next',
+                        rows: [
+                            { action: 'Ask for feed guidance, nutrient targets, or ingredient roles here.' },
+                            {
+                                action: redirectTarget.type === 'unlock_formulation'
+                                    ? 'Open formulation and unlock this mix.'
+                                    : 'Open formulation and select an unlocked mix.'
+                            }
+                        ]
+                    }
+                ],
+                followUpPrompts: [
+                    'What nutrient targets matter most for this stage?',
+                    'How do I reduce feed cost without requesting an exact recipe?',
+                    'What can you guide me on before I open formulation?'
+                ]
+            });
+
+            thread.lastMessageAt = assistantMessage.createdAt;
+            await thread.save();
+
+            await AiInteraction.create({
+                userId,
+                threadId: threadObjectId,
+                requestId,
+                ...(context.formulationId ? { formulationId: context.formulationId } : {}),
+                kind: 'what_if',
+                status: 'success',
+                verificationStatus: 'not_applicable',
+                prompt: userScenarioText,
+                answer: assistantText,
+                citations: [],
+                numericClaims: [],
+                verificationErrors: [],
+                modelPrimary: 'policy-guardrail',
+                modelFallback: 'policy-guardrail',
+                modelUsed: 'policy-guardrail',
+                fallbackUsed: false,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                estimatedCostUsd: 0,
+                pricingSource: 'unknown',
+                latencyMs: Date.now() - startedAt,
+                attempts: [
+                    {
+                        model: 'policy-guardrail',
+                        latencyMs: Date.now() - startedAt,
+                        status: 'success'
+                    }
+                ],
+                toolTrace: [
+                    {
+                        type: 'policy',
+                        name: 'scenario_guardrail',
+                        status: 'blocked',
+                        result: toolResult
+                    }
+                ]
+            });
+
+            return res.json({
+                thread: mapThreadDoc(thread),
+                userMessage: mapMessageDoc(userMessage),
+                assistantMessage: mapMessageDoc(assistantMessage),
+                scenario: {
+                    scenarioType,
+                    title: 'Scenario simulation locked',
+                    summary: assistantText,
+                    violations: [],
+                    recommendations: [
+                        'Open formulation and unlock a mix to run exact scenarios.'
+                    ]
+                }
+            });
+        };
+
+        if (!context.formulationId) {
+            return buildLockedScenarioResponse({
+                redirectTarget: { type: 'open_formulation' },
+                prompt: 'This scenario request has no attached formulation context.',
+                toolResult: {
+                    reason: 'missing_formulation_context',
+                    scenarioType
+                }
+            });
+        }
+
+        const formulation = await getFormulationWithStandardForUser(context.formulationId, userId);
+        if (!formulation || formulation.isUnlocked !== true) {
+            return buildLockedScenarioResponse({
+                redirectTarget: {
+                    type: 'unlock_formulation',
+                    formulationId: context.formulationId
+                },
+                prompt: 'This mix is not unlocked yet, so exact scenario outputs are not available here.',
+                toolResult: {
+                    reason: 'locked_formulation',
+                    scenarioType,
+                    formulationId: context.formulationId
+                }
+            });
+        }
+
         const scenarioResult = await runScenarioSimulation({
             userId,
             scenarioType,
@@ -3206,7 +4289,6 @@ export const postFormulationAnalystScenario = async (req: Request, res: Response
             parameters: req.body?.parameters
         });
 
-        const userScenarioText = formatScenarioLabel(scenarioType);
         const userMessage = await AiMessage.create({
             conversationId: threadObjectId,
             userId: userObjectId,
@@ -3250,6 +4332,8 @@ export const postFormulationAnalystScenario = async (req: Request, res: Response
                 }
             ],
             verificationStatus: 'passed',
+            policyStatus: 'allowed',
+            groundingMode: 'deterministic_formulation',
             scenario: {
                 scenarioType,
                 inputs: req.body?.parameters || {},
