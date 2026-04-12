@@ -44,6 +44,11 @@ export interface SolverInput {
     strategy?: FormulationStrategy;
     feedCategory?: 'Catfish' | 'Poultry';
     poultryType?: 'Broiler' | 'Layer';
+    catfishStageGuidance?: {
+        stageLabel: string;
+        estimatedMaizePct?: number;
+        fishmeal72EquivalentPct?: { min: number; max: number };
+    };
 }
 
 export interface SolverOutput {
@@ -97,12 +102,36 @@ export interface InfeasibilityAnalysis {
  * Uses the Simplex Algorithm to find the cheapest ingredient combination
  */
 export class FeedOptimizationService {
+    private isPrimaryCarbohydrateIngredient(ingredient: Pick<IngredientForSolver, 'name'>): boolean {
+        const normalized = ingredient.name.toUpperCase().trim();
+        return normalized === 'MAIZE' || normalized === 'SORGHUM' || normalized === 'MILLET';
+    }
+
+    private getFishmealProteinEquivalentFactor(ingredient: Pick<IngredientForSolver, 'name' | 'nutrients'>): number {
+        const upperName = ingredient.name.toUpperCase();
+        if (!upperName.includes('FISHMEAL') && !upperName.includes('FISH MEAL')) {
+            return 0;
+        }
+
+        const protein = Number(ingredient.nutrients.protein || 0);
+        if (!Number.isFinite(protein) || protein <= 0) return 0;
+        return protein / 72;
+    }
+
+    private isAnimalProteinIngredient(ingredient: Pick<IngredientForSolver, 'name' | 'tags'>): boolean {
+        const upperName = ingredient.name.toUpperCase();
+        return Boolean(
+            ingredient.tags?.includes('ANIMAL_PROTEIN')
+            || upperName.includes('FISHMEAL')
+            || upperName.includes('BLOOD MEAL')
+        );
+    }
 
     /**
      * Optimize feed formulation to minimize cost while meeting nutritional requirements
      */
     async optimizeFormulation(input: SolverInput): Promise<SolverOutput> {
-        const { targetWeightKg, ingredients, nutritionalTarget, feedCategory } = input;
+        const { targetWeightKg, ingredients, nutritionalTarget, feedCategory, catfishStageGuidance } = input;
         const strategy = input.strategy || FormulationStrategy.LEAST_COST;
 
         // Fetch dynamic configuration
@@ -141,7 +170,29 @@ export class FeedOptimizationService {
         if (isPoultry) {
             // Poultry specific logic can go here if needed
         }
-        const requiresAnimalProtein = ingredients.some(i => i.tags?.includes('ANIMAL_PROTEIN')) || isCatfish;
+        const animalProteinCandidates = ingredients.filter((ingredient) =>
+            this.isAnimalProteinIngredient(ingredient)
+        );
+        const requiresAnimalProtein = animalProteinCandidates.length > 0 || isCatfish;
+
+        if (isCatfish && animalProteinCandidates.length === 0) {
+            const infeasibility = await this.analyzeInfeasibility(
+                ingredients,
+                nutritionalTarget,
+                targetWeightKg,
+                true,
+                catfishStageGuidance
+            );
+            return {
+                strategy,
+                ingredientQuantities: {},
+                totalCost: 0,
+                actualNutrients: this.createEmptyNutrients(),
+                feasible: false,
+                message: infeasibility.summary,
+                infeasibility
+            };
+        }
 
         // Build the linear programming model
         const model: any = {
@@ -154,7 +205,13 @@ export class FeedOptimizationService {
                 // NEW: Animal Protein requirement (for Catfish only)
                 ...(isCatfish ? { total_animal_protein: { min: (minAnimalProteinPct / 100) * targetWeightKg } } : {}),
                 // NEW: Blood Meal Limit (10% of total animal protein)
-                ...(requiresAnimalProtein ? { blood_meal_ratio: { max: 0 } } : {})
+                ...(requiresAnimalProtein ? { blood_meal_ratio: { max: 0 } } : {}),
+                ...(isCatfish && catfishStageGuidance?.fishmeal72EquivalentPct ? {
+                    catfish_fishmeal_equivalent_total: {
+                        min: (catfishStageGuidance.fishmeal72EquivalentPct.min / 100) * targetWeightKg,
+                        max: (catfishStageGuidance.fishmeal72EquivalentPct.max / 100) * targetWeightKg
+                    }
+                } : {})
             },
             variables: {},
             ints: {}
@@ -168,7 +225,7 @@ export class FeedOptimizationService {
             const varName = ing.id;
             const isMaize = ing.name.toUpperCase().includes('MAIZE');
             const isBloodMeal = ing.name.toUpperCase().includes('BLOOD MEAL');
-            const isAnimalProtein = ing.tags?.includes('ANIMAL_PROTEIN') || isBloodMeal;
+            const isAnimalProtein = this.isAnimalProteinIngredient(ing) || isBloodMeal;
 
             // Apply Maize Dominance penalty (slightly lower price for maize to favor it)
             const adjustedPrice = isMaize ? ing.price * maizeMult : ing.price;
@@ -179,7 +236,10 @@ export class FeedOptimizationService {
                 strategy_high_protein: ing.nutrients.protein > 40 ? 1 : 0,
                 strategy_cheap_max: ing.price < 300 ? 1 : 0,
                 ...(isCatfish ? { total_animal_protein: isAnimalProtein ? 1 : 0 } : {}),
-                ...(requiresAnimalProtein ? { blood_meal_ratio: isBloodMeal ? (1 - bloodMealMaxRatio / 100) : (isAnimalProtein ? (-bloodMealMaxRatio / 100) : 0) } : {})
+                ...(requiresAnimalProtein ? { blood_meal_ratio: isBloodMeal ? (1 - bloodMealMaxRatio / 100) : (isAnimalProtein ? (-bloodMealMaxRatio / 100) : 0) } : {}),
+                ...(isCatfish && catfishStageGuidance?.fishmeal72EquivalentPct ? {
+                    catfish_fishmeal_equivalent_total: this.getFishmealProteinEquivalentFactor(ing)
+                } : {})
             };
 
             // Add nutritional contributions
@@ -224,7 +284,21 @@ export class FeedOptimizationService {
             const fallbackModel: any = {
                 optimize: 'cost',
                 opType: 'min',
-                constraints: { weight: { equal: targetWeightKg } },
+                constraints: {
+                    weight: { equal: targetWeightKg },
+                    ...(isCatfish ? {
+                        total_animal_protein: {
+                            min: (minAnimalProteinPct / 100) * targetWeightKg
+                        }
+                    } : {}),
+                    ...(requiresAnimalProtein ? { blood_meal_ratio: { max: 0 } } : {}),
+                    ...(isCatfish && catfishStageGuidance?.fishmeal72EquivalentPct ? {
+                        catfish_fishmeal_equivalent_total: {
+                            min: (catfishStageGuidance.fishmeal72EquivalentPct.min / 100) * targetWeightKg,
+                            max: (catfishStageGuidance.fishmeal72EquivalentPct.max / 100) * targetWeightKg
+                        }
+                    } : {})
+                },
                 variables: model.variables,
                 ints: model.ints
             };
@@ -246,7 +320,8 @@ export class FeedOptimizationService {
                     ingredients,
                     nutritionalTarget,
                     targetWeightKg,
-                    isCatfish
+                    isCatfish,
+                    catfishStageGuidance
                 );
                 return {
                     strategy,
@@ -417,13 +492,15 @@ export class FeedOptimizationService {
         ingredients: IngredientForSolver[],
         target: NutritionalTarget,
         targetWeightKg: number,
-        isCatfish: boolean
+        isCatfish: boolean,
+        catfishStageGuidance?: SolverInput['catfishStageGuidance']
     ): Promise<InfeasibilityAnalysis> {
         return this.buildInfeasibilityAnalysis(
             ingredients,
             target,
             targetWeightKg,
-            isCatfish
+            isCatfish,
+            catfishStageGuidance
         );
     }
 
@@ -431,7 +508,8 @@ export class FeedOptimizationService {
         ingredients: IngredientForSolver[],
         target: NutritionalTarget,
         targetWeightKg: number,
-        isCatfish: boolean
+        isCatfish: boolean,
+        catfishStageGuidance?: SolverInput['catfishStageGuidance']
     ): Promise<InfeasibilityAnalysis> {
         const configs = await configService.getAll();
         const allowRelaxations = configs.suggestion_allow_relaxations !== false;
@@ -534,19 +612,53 @@ export class FeedOptimizationService {
 
         // Catfish rule checks
         if (isCatfish) {
-            const animalProteinCandidates = ingredients.filter(i => i.tags?.includes('ANIMAL_PROTEIN'));
+            const animalProteinCandidates = ingredients.filter(i => this.isAnimalProteinIngredient(i));
+            const fishmealCandidates = ingredients.filter(i => this.getFishmealProteinEquivalentFactor(i) > 0);
+            const carbohydrateCandidates = ingredients.filter(i => this.isPrimaryCarbohydrateIngredient(i));
             if (animalProteinCandidates.length === 0) {
-                const message = 'Catfish feed requires at least one animal-protein ingredient.';
+                const message = 'Catfish feed requires animal-protein ingredients and must include at least 10% animal protein in the final mix.';
                 violations.push({
                     constraintId: 'total_animal_protein',
                     type: 'business_rule',
                     current: 0,
-                    required: 1,
-                    gap: 1,
+                    required: 10,
+                    gap: 10,
                     unit: 'flag',
                     message
                 });
-                suggestions.push(message);
+                suggestions.push(`${message} Add a valid animal-protein ingredient such as fishmeal before recalculating.`);
+            }
+
+            if (catfishStageGuidance?.fishmeal72EquivalentPct && fishmealCandidates.length === 0) {
+                const range = `${catfishStageGuidance.fishmeal72EquivalentPct.min.toFixed(0)}-${catfishStageGuidance.fishmeal72EquivalentPct.max.toFixed(0)}%`;
+                const message = `${catfishStageGuidance.stageLabel} guidance requires fishmeal in the ${range} range (72% protein equivalent).`;
+                violations.push({
+                    constraintId: 'catfish_fishmeal_equivalent_total',
+                    type: 'business_rule',
+                    current: 0,
+                    required: catfishStageGuidance.fishmeal72EquivalentPct.min,
+                    gap: catfishStageGuidance.fishmeal72EquivalentPct.min,
+                    unit: '%',
+                    message
+                });
+                suggestions.push(`${message} Add FISHMEAL 72% or FISHMEAL 65% before recalculating.`);
+            }
+
+            if (
+                catfishStageGuidance?.estimatedMaizePct &&
+                carbohydrateCandidates.length === 0
+            ) {
+                const message = `${catfishStageGuidance.stageLabel} guidance estimates carbohydrate support around ${catfishStageGuidance.estimatedMaizePct.toFixed(0)}% maize, but sorghum or millet can also be used.`;
+                violations.push({
+                    constraintId: 'catfish_carbohydrate_anchor',
+                    type: 'business_rule',
+                    current: 0,
+                    required: catfishStageGuidance.estimatedMaizePct,
+                    gap: catfishStageGuidance.estimatedMaizePct,
+                    unit: '%',
+                    message
+                });
+                suggestions.push(`${message} Add MAIZE, SORGHUM, or MILLET before recalculating.`);
             }
 
             const bloodMeal = ingredients.find(i => i.name.toUpperCase().includes('BLOOD MEAL'));

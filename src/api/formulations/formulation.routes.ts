@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../../middleware/auth.middleware';
 import {
     calculateFormulation,
+    checkExistingMix,
     previewFormulationFix,
     evaluateAlternativeOptions,
     getAlternativeCacheResult,
@@ -26,6 +27,7 @@ router.use(requireAuth);
  * @access  Private
  */
 router.post('/calculate', calculateFormulation);
+router.post('/check-mix', checkExistingMix);
 
 /**
  * @route   POST /api/v1/formulations/preview-fix

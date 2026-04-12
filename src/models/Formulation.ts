@@ -17,6 +17,17 @@ export interface IAlternativeSuggestion {
     savings: number;  // ₦ savings
 }
 
+export interface IAppliedAlternative {
+    originalIngredientId: mongoose.Types.ObjectId;
+    originalIngredientName: string;
+    alternativeIngredientId: mongoose.Types.ObjectId;
+    alternativeIngredientName: string;
+    selectionMode: 'explicit' | 'auto';
+    maxBlendPercent: number;
+    notes?: string;
+    estimatedCostDeltaPerKg?: number;
+}
+
 export interface IFormulationStrategyOption {
     strategy: string;
     totalCost: number;
@@ -26,6 +37,7 @@ export interface IFormulationStrategyOption {
     qualityMatchPercentage: number;
     ingredientsUsed: IIngredientUsed[];
     actualNutrients: INutrients;
+    appliedAlternatives?: IAppliedAlternative[];
 }
 
 export interface IFormulation extends Document {
@@ -54,6 +66,7 @@ export interface IFormulation extends Document {
 
     // Smart Recommendations
     alternatives: IAlternativeSuggestion[];
+    appliedAlternatives?: IAppliedAlternative[];
 
     // Per-strategy snapshots generated during optimization.
     strategyOptions: IFormulationStrategyOption[];
@@ -121,6 +134,43 @@ const AlternativeSuggestionSchema = new Schema({
     savings: { type: Number, required: true }
 }, { _id: false });
 
+const AppliedAlternativeSchema = new Schema({
+    originalIngredientId: {
+        type: Schema.Types.ObjectId,
+        ref: 'Ingredient',
+        required: true
+    },
+    originalIngredientName: {
+        type: String,
+        required: true
+    },
+    alternativeIngredientId: {
+        type: Schema.Types.ObjectId,
+        ref: 'Ingredient',
+        required: true
+    },
+    alternativeIngredientName: {
+        type: String,
+        required: true
+    },
+    selectionMode: {
+        type: String,
+        enum: ['explicit', 'auto'],
+        required: true
+    },
+    maxBlendPercent: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    notes: {
+        type: String
+    },
+    estimatedCostDeltaPerKg: {
+        type: Number
+    }
+}, { _id: false });
+
 const StrategyOptionSchema = new Schema({
     strategy: {
         type: String,
@@ -168,6 +218,10 @@ const StrategyOptionSchema = new Schema({
         methionine: { type: Number, required: true },
         calcium: { type: Number, required: true },
         phosphorous: { type: Number, required: true }
+    },
+    appliedAlternatives: {
+        type: [AppliedAlternativeSchema],
+        default: []
     }
 }, { _id: false });
 
@@ -242,6 +296,10 @@ const FormulationSchema = new Schema<IFormulation>({
     },
     alternatives: {
         type: [AlternativeSuggestionSchema],
+        default: []
+    },
+    appliedAlternatives: {
+        type: [AppliedAlternativeSchema],
         default: []
     },
     strategyOptions: {

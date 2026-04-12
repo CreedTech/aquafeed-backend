@@ -32,6 +32,7 @@ interface SelectedIngredientInput {
     minInclusionPct?: number;
     maxInclusionPct?: number;
     alternativeIngredientId?: string;
+    exactQtyKg?: number;
 }
 
 interface FormulationRequestBody {
@@ -58,8 +59,19 @@ interface StructuredInfeasibleResponse {
     poultryType?: string;
 }
 
+interface StructuredNonCompliantResponse {
+    status: 'non_compliant';
+    error: string;
+    message: string;
+    suggestion: string;
+    bestQualityMatch: number;
+    feedType: 'fish' | 'poultry';
+    fishSubtype?: string;
+    poultryType?: string;
+}
+
 interface FormulationOption {
-    strategy: FormulationStrategy;
+    strategy: FormulationStrategy | 'EXACT_MIX';
     feasible: true;
     complianceColor: 'Red' | 'Blue' | 'Green';
     qualityMatch: number;
@@ -67,6 +79,9 @@ interface FormulationOption {
     totalCost: number;
     costPerKg: number;
     actualNutrients: Record<string, number>;
+    requestedTargetWeightKg: number;
+    actualOutputWeightKg: number;
+    evaluationMode: 'optimized' | 'exact';
     recipe: Array<{
         name: string;
         qtyKg: number;
@@ -74,6 +89,7 @@ interface FormulationOption {
         priceAtMoment: number;
         isAutoCalculated?: boolean;
     }>;
+    appliedAlternatives: AppliedAlternativeSelection[];
     overheadCost: number;
 }
 
@@ -89,6 +105,61 @@ interface BuildComputationResult {
     infeasibility?: InfeasibilityAnalysis;
     standard: IFeedStandard;
     effectiveWeightKg: number;
+}
+
+interface ResolvedSelectedIngredient extends SelectedIngredientInput {
+    originalIngredientId: string;
+    originalIngredientName?: string;
+    selectionMode: 'original' | 'explicit' | 'auto';
+    alternativeRuleMaxBlendPercent?: number;
+    alternativeRuleNotes?: string;
+    alternativeEstimatedCostDeltaPerKg?: number;
+}
+
+interface AppliedAlternativeSelection {
+    originalIngredientId: string;
+    originalIngredientName: string;
+    alternativeIngredientId: string;
+    alternativeIngredientName: string;
+    selectionMode: 'explicit' | 'auto';
+    maxBlendPercent: number;
+    notes?: string;
+    estimatedCostDeltaPerKg?: number;
+}
+
+type CatfishStageGuidance = {
+    stageLabel: string;
+    estimatedMaizePct?: number;
+    fishmeal72EquivalentPct?: { min: number; max: number };
+};
+
+type AlternativeSuggestionGroup = {
+    originalIngredient: {
+        id?: string;
+        name: string;
+        price: number;
+        category?: string;
+    };
+    alternatives: Array<{
+        ruleId: string;
+        id?: string;
+        name: string;
+        price: number;
+        category?: string;
+        estimatedCostDeltaPerKg: number;
+        maxBlendPercent: number;
+        notes?: string;
+    }>;
+};
+
+class FormulationRequestError extends Error {
+    statusCode: number;
+
+    constructor(message: string, statusCode = 400) {
+        super(message);
+        this.name = 'FormulationRequestError';
+        this.statusCode = statusCode;
+    }
 }
 
 const getFeedType = (feedCategory: string): 'fish' | 'poultry' => (
@@ -133,6 +204,52 @@ const getConfiguredFormulationFee = async (): Promise<number> => {
 const getFishSubtype = (standard: IFeedStandard): string | undefined => {
     if (getFeedType(standard.feedCategory) !== 'fish') return undefined;
     return standard.fishType ? standard.fishType.toLowerCase() : 'catfish';
+};
+
+const getCatfishStageGuidance = (standard: IFeedStandard): CatfishStageGuidance | undefined => {
+    if (getFeedType(standard.feedCategory) !== 'fish') return undefined;
+
+    const normalizedStageCode = resolveCanonicalStageCode(String(standard.stageCode || ''), {
+        feedType: 'fish',
+        stageLabel: String(standard.stage || ''),
+        standardName: String(standard.name || '')
+    });
+    const stageLabel = String(standard.stage || standard.name || 'Catfish').trim();
+
+    if (normalizedStageCode.includes('FINGERLING')) {
+        return {
+            stageLabel,
+            estimatedMaizePct: 9,
+            fishmeal72EquivalentPct: { min: 40, max: 50 }
+        };
+    }
+
+    if (normalizedStageCode.includes('JUVENILE')) {
+        return {
+            stageLabel,
+            estimatedMaizePct: 12,
+            fishmeal72EquivalentPct: { min: 25, max: 35 }
+        };
+    }
+
+    if (normalizedStageCode.includes('GROW_OUT') || normalizedStageCode.includes('GROW-OUT')) {
+        return {
+            stageLabel,
+            estimatedMaizePct: 15,
+            fishmeal72EquivalentPct: { min: 10, max: 20 }
+        };
+    }
+
+    return undefined;
+};
+
+const objectIdToString = (value: unknown): string => {
+    if (!value) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'object' && value !== null && 'toString' in value) {
+        return value.toString();
+    }
+    return String(value);
 };
 
 const clampNonNegative = (value: number | undefined): number | undefined => {
@@ -193,7 +310,8 @@ const coerceFormulationRequest = (body: unknown): FormulationRequestBody => {
                 volumeLiters: i.volumeLiters !== undefined ? Number(i.volumeLiters) : undefined,
                 minInclusionPct: i.minInclusionPct !== undefined ? Number(i.minInclusionPct) : undefined,
                 maxInclusionPct: i.maxInclusionPct !== undefined ? Number(i.maxInclusionPct) : undefined,
-                alternativeIngredientId: i.alternativeIngredientId
+                alternativeIngredientId: i.alternativeIngredientId,
+                exactQtyKg: i.exactQtyKg !== undefined ? Number(i.exactQtyKg) : undefined
             }))
             : [],
         batchName: raw.batchName,
@@ -203,6 +321,106 @@ const coerceFormulationRequest = (body: unknown): FormulationRequestBody => {
             ? Number(raw.globalTargetRelaxationPct)
             : undefined
     };
+};
+
+const chooseAutoAlternativeRule = (
+    sourceIngredient: { alternatives?: Array<unknown> },
+    candidateRules: Array<{
+        originalIngredientId: unknown;
+        alternativeIngredientId: unknown;
+        maxBlendPercent?: number;
+        notes?: string;
+    }>
+) => {
+    const preferredOrder = Array.isArray(sourceIngredient.alternatives)
+        ? sourceIngredient.alternatives.map((item) => objectIdToString(item))
+        : [];
+
+    for (const alternativeId of preferredOrder) {
+        const matchedRule = candidateRules.find(
+            (rule) =>
+                objectIdToString(rule.alternativeIngredientId) === alternativeId,
+        );
+        if (matchedRule) return matchedRule;
+    }
+
+    return candidateRules[0];
+};
+
+const buildAlternativeSuggestionGroups = (
+    ingredientIds: string[],
+    rules: Array<{
+        _id: unknown;
+        originalIngredientId: {
+            _id?: unknown;
+            name: string;
+            defaultPrice?: number;
+            category?: string;
+        };
+        alternativeIngredientId: {
+            _id?: unknown;
+            name: string;
+            defaultPrice?: number;
+            category?: string;
+        };
+        maxBlendPercent?: number;
+        notes?: string;
+    }>
+): AlternativeSuggestionGroup[] => {
+    const grouped = new Map<string, AlternativeSuggestionGroup>();
+
+    rules.forEach((rule) => {
+        const originalId = objectIdToString(rule.originalIngredientId?._id);
+        if (!originalId) return;
+
+        const current =
+            grouped.get(originalId) ||
+            {
+                originalIngredient: {
+                    id: originalId,
+                    name: rule.originalIngredientId?.name || 'Unknown ingredient',
+                    price: Number(rule.originalIngredientId?.defaultPrice || 0),
+                    category: rule.originalIngredientId?.category,
+                },
+                alternatives: [],
+            };
+
+        current.alternatives.push({
+            ruleId: objectIdToString(rule._id),
+            id: objectIdToString(rule.alternativeIngredientId?._id),
+            name: rule.alternativeIngredientId?.name || 'Unknown ingredient',
+            price: Number(rule.alternativeIngredientId?.defaultPrice || 0),
+            category: rule.alternativeIngredientId?.category,
+            estimatedCostDeltaPerKg:
+                Number(rule.alternativeIngredientId?.defaultPrice || 0) -
+                Number(rule.originalIngredientId?.defaultPrice || 0),
+            maxBlendPercent: Number(rule.maxBlendPercent || 100),
+            notes: rule.notes,
+        });
+
+        grouped.set(originalId, current);
+    });
+
+    return ingredientIds
+        .map((ingredientId) => grouped.get(ingredientId))
+        .filter((group): group is AlternativeSuggestionGroup => {
+            if (!group) return false;
+            return group.alternatives.length > 0;
+        })
+        .map((group) => ({
+            ...group,
+            alternatives: group.alternatives
+                .slice()
+                .sort((a, b) => {
+                    if (a.estimatedCostDeltaPerKg !== b.estimatedCostDeltaPerKg) {
+                        return a.estimatedCostDeltaPerKg - b.estimatedCostDeltaPerKg;
+                    }
+                    return a.name.localeCompare(b.name, undefined, {
+                        sensitivity: 'base',
+                        numeric: true,
+                    });
+                }),
+        }));
 };
 
 const applyActionPatchToRequest = (
@@ -350,6 +568,26 @@ const toStructuredInfeasibleResponse = (
     };
 };
 
+const toStructuredNonCompliantResponse = (
+    standard: IFeedStandard,
+    options: FormulationOption[]
+): StructuredNonCompliantResponse => {
+    const bestOption = options
+        .slice()
+        .sort((a, b) => b.qualityMatch - a.qualityMatch)[0];
+
+    return {
+        status: 'non_compliant',
+        error: 'No compliant formulation available',
+        message: 'A mathematical mix was generated, but every option failed compliance checks.',
+        suggestion: 'Add stronger ingredients, widen the ingredient set, or use Check Existing Mix to evaluate a fixed spreadsheet formula without optimization.',
+        bestQualityMatch: Number(bestOption?.qualityMatch || 0),
+        feedType: getFeedType(standard.feedCategory),
+        fishSubtype: getFishSubtype(standard),
+        poultryType: standard.poultryType?.toLowerCase()
+    };
+};
+
 const runFormulationComputation = async (
     payload: FormulationRequestBody
 ): Promise<BuildComputationResult> => {
@@ -358,7 +596,7 @@ const runFormulationComputation = async (
 
     const standard = await resolveStandardForRequest(payload);
     if (!standard) {
-        throw new Error('Feed standard not found');
+        throw new FormulationRequestError('Feed standard not found', 404);
     }
 
     const originalIngredientIds = selectedIngredients.map((ing) => ing.ingredientId);
@@ -372,23 +610,114 @@ const runFormulationComputation = async (
         originalById.set(ingredient._id.toString(), ingredient);
     });
 
-    const resolvedSelections = selectedIngredients.map((selection) => {
+    const feedType = getFeedType(standard.feedCategory);
+    const alternativeRules = await AlternativeRule.find({
+        originalIngredientId: { $in: originalIngredientIds },
+        isActive: true,
+        feedType: { $in: [feedType, 'both'] }
+    }).lean();
+
+    const alternativeRulesByOriginalId = new Map<
+        string,
+        Array<{
+            originalIngredientId: unknown;
+            alternativeIngredientId: unknown;
+            maxBlendPercent?: number;
+            notes?: string;
+        }>
+    >();
+    alternativeRules.forEach((rule) => {
+        const key = objectIdToString(rule.originalIngredientId);
+        const current = alternativeRulesByOriginalId.get(key) || [];
+        current.push(rule);
+        alternativeRulesByOriginalId.set(key, current);
+    });
+
+    const resolvedSelections: ResolvedSelectedIngredient[] = selectedIngredients.map((selection) => {
         const sourceIngredient = originalById.get(selection.ingredientId);
-        if (!sourceIngredient) return selection;
+        if (!sourceIngredient) {
+            return {
+                ...selection,
+                originalIngredientId: selection.ingredientId,
+                selectionMode: 'original',
+            };
+        }
+        const candidateRules = alternativeRulesByOriginalId.get(selection.ingredientId) || [];
 
         if (selection.alternativeIngredientId && selection.alternativeIngredientId !== 'AUTO') {
-            return { ...selection, ingredientId: selection.alternativeIngredientId };
+            const explicitRule = candidateRules.find(
+                (rule) =>
+                    objectIdToString(rule.alternativeIngredientId) ===
+                    selection.alternativeIngredientId,
+            );
+            if (!explicitRule) {
+                throw new FormulationRequestError(
+                    `Selected alternative is not valid for ${sourceIngredient.name}.`,
+                );
+            }
+
+            return {
+                ...selection,
+                ingredientId: selection.alternativeIngredientId,
+                originalIngredientId: sourceIngredient._id.toString(),
+                originalIngredientName: sourceIngredient.name,
+                selectionMode: 'explicit',
+                alternativeRuleMaxBlendPercent: Number(
+                    explicitRule.maxBlendPercent ?? 100,
+                ),
+                alternativeRuleNotes: explicitRule.notes,
+            };
         }
 
         if (selection.alternativeIngredientId === 'AUTO') {
-            const firstAlternative = sourceIngredient.alternatives?.[0]?.toString();
+            const autoRule = chooseAutoAlternativeRule(sourceIngredient, candidateRules);
+            const firstAlternative = objectIdToString(autoRule?.alternativeIngredientId);
             if (firstAlternative) {
-                return { ...selection, ingredientId: firstAlternative };
+                return {
+                    ...selection,
+                    ingredientId: firstAlternative,
+                    originalIngredientId: sourceIngredient._id.toString(),
+                    originalIngredientName: sourceIngredient.name,
+                    selectionMode: 'auto',
+                    alternativeRuleMaxBlendPercent: Number(
+                        autoRule?.maxBlendPercent ?? 100,
+                    ),
+                    alternativeRuleNotes: autoRule?.notes,
+                };
             }
         }
 
-        return selection;
+        return {
+            ...selection,
+            originalIngredientId: sourceIngredient._id.toString(),
+            originalIngredientName: sourceIngredient.name,
+            selectionMode: 'original',
+        };
     });
+
+    const resolvedSelectionIds = resolvedSelections.map(
+        (selection) => selection.ingredientId,
+    );
+    const duplicateResolvedSelectionIds = Array.from(
+        new Set(
+            resolvedSelectionIds.filter(
+                (id, index) => resolvedSelectionIds.indexOf(id) !== index,
+            ),
+        ),
+    );
+    if (duplicateResolvedSelectionIds.length > 0) {
+        const duplicateNames = duplicateResolvedSelectionIds
+            .map((ingredientId) => {
+                const selection = resolvedSelections.find(
+                    (item) => item.ingredientId === ingredientId,
+                );
+                return selection?.originalIngredientName || ingredientId;
+            })
+            .join(', ');
+        throw new FormulationRequestError(
+            `Multiple selected ingredients resolve to the same ingredient (${duplicateNames}). Remove duplicates or choose different alternatives.`,
+        );
+    }
 
     const resolvedIngredientIds = resolvedSelections.map((ing) => ing.ingredientId);
     const ingredients = await Ingredient.find({
@@ -397,20 +726,82 @@ const runFormulationComputation = async (
     });
 
     if (ingredients.length === 0) {
-        throw new Error('No valid ingredients selected');
+        throw new FormulationRequestError('No valid ingredients selected');
     }
 
-    const selectedByIngredientId = new Map<string, SelectedIngredientInput>();
+    if (ingredients.length !== resolvedIngredientIds.length) {
+        throw new FormulationRequestError(
+            'One or more selected alternative ingredients are unavailable or inactive.',
+        );
+    }
+
+    const selectedByIngredientId = new Map<string, ResolvedSelectedIngredient>();
     resolvedSelections.forEach((selected) => {
         selectedByIngredientId.set(selected.ingredientId, selected);
     });
+
+    const ingredientById = new Map(
+        ingredients.map((ingredient) => [ingredient._id.toString(), ingredient]),
+    );
+
+    const appliedAlternatives = resolvedSelections
+        .reduce<AppliedAlternativeSelection[]>((accumulator, selection) => {
+            if (
+                selection.selectionMode !== 'explicit' &&
+                selection.selectionMode !== 'auto'
+            ) {
+                return accumulator;
+            }
+
+                const alternativeIngredient = ingredientById.get(selection.ingredientId);
+                if (!alternativeIngredient || !selection.originalIngredientName) {
+                    return accumulator;
+                }
+                const originalIngredient = originalById.get(selection.originalIngredientId);
+                accumulator.push({
+                    originalIngredientId: selection.originalIngredientId,
+                    originalIngredientName: selection.originalIngredientName,
+                    alternativeIngredientId: alternativeIngredient._id.toString(),
+                    alternativeIngredientName: alternativeIngredient.name,
+                    selectionMode: selection.selectionMode as 'explicit' | 'auto',
+                    maxBlendPercent: Number(
+                        selection.alternativeRuleMaxBlendPercent ?? 100,
+                    ),
+                    notes: selection.alternativeRuleNotes,
+                    estimatedCostDeltaPerKg:
+                        Number(alternativeIngredient.defaultPrice || 0) -
+                        Number(originalIngredient?.defaultPrice || 0),
+                });
+                return accumulator;
+            }, []);
 
     const ingredientsForSolver = ingredients
         .filter((ing) => !ing.isAutoCalculated)
         .map((ing) => {
             const selectedIng = selectedByIngredientId.get(ing._id.toString());
-            const minInclusion = selectedIng?.minInclusionPct ?? ing.constraints.min_inclusion;
-            const maxInclusion = selectedIng?.maxInclusionPct ?? ing.constraints.max_inclusion;
+            const minInclusion =
+                selectedIng?.minInclusionPct ?? ing.constraints.min_inclusion;
+            const maxCandidates = [
+                selectedIng?.maxInclusionPct,
+                ing.constraints.max_inclusion,
+                selectedIng?.alternativeRuleMaxBlendPercent,
+            ].filter(
+                (value): value is number =>
+                    typeof value === 'number' && Number.isFinite(value),
+            );
+            const maxInclusion =
+                maxCandidates.length > 0 ? Math.min(...maxCandidates) : undefined;
+
+            if (
+                minInclusion !== undefined &&
+                maxInclusion !== undefined &&
+                minInclusion > maxInclusion
+            ) {
+                throw new FormulationRequestError(
+                    `${ing.name} minimum inclusion (${minInclusion}%) exceeds the allowed maximum (${maxInclusion}%).`,
+                );
+            }
+
             return {
                 id: ing._id.toString(),
                 name: ing.name,
@@ -441,6 +832,7 @@ const runFormulationComputation = async (
         payload.globalTargetRelaxationPct
     );
     const targetNutrients = mergeTargets(relaxedBaseTarget, targetOverrides);
+    const catfishStageGuidance = getCatfishStageGuidance(standard);
 
     const strategies: FormulationStrategy[] = [
         FormulationStrategy.LEAST_COST,
@@ -456,7 +848,8 @@ const runFormulationComputation = async (
             tolerance: standard.tolerance,
             strategy,
             feedCategory: standard.feedCategory,
-            poultryType: standard.poultryType
+            poultryType: standard.poultryType,
+            catfishStageGuidance
         });
 
         if (!solverResult.feasible) {
@@ -468,24 +861,13 @@ const runFormulationComputation = async (
             };
         }
 
-        const roundedQuantities = solverService.roundToBags(
-            solverResult.ingredientQuantities,
-            ingredientsForSolver
-        );
-        const roundedQuantitiesKg = Object.fromEntries(
-            Object.entries(roundedQuantities).map(([ingId, rounded]) => [ingId, rounded.kg])
-        );
-        const roundedActualNutrients = await solverService.calculateActualNutrients(
-            roundedQuantitiesKg,
-            ingredientsForSolver,
-            effectiveWeightKg
-        );
+        const looseQuantitiesKg = { ...solverResult.ingredientQuantities };
 
         let totalCostWithBags = 0;
-        Object.keys(roundedQuantities).forEach((ingId) => {
+        Object.keys(looseQuantitiesKg).forEach((ingId) => {
             const solverIngredient = ingredientsForSolver.find((i) => i.id === ingId);
             if (solverIngredient) {
-                totalCostWithBags += roundedQuantities[ingId].kg * solverIngredient.price;
+                totalCostWithBags += looseQuantitiesKg[ingId] * solverIngredient.price;
             }
         });
 
@@ -503,16 +885,27 @@ const runFormulationComputation = async (
             });
         });
 
+        const looseBaseWeightKg = Object.values(looseQuantitiesKg)
+            .reduce((sum, qty) => sum + Number(qty || 0), 0);
+        const autoCalculatedWeightKg = autoCalcRecipe
+            .reduce((sum, item) => sum + Number(item.qtyKg || 0), 0);
+        const actualOutputWeightKg = looseBaseWeightKg + autoCalculatedWeightKg;
+
+        const roundedActualNutrients = await solverService.calculateActualNutrients(
+            looseQuantitiesKg,
+            ingredientsForSolver,
+            actualOutputWeightKg > 0 ? actualOutputWeightKg : effectiveWeightKg
+        );
+
         totalCostWithBags += Number(overheadCost);
 
         const recipeSnapshot = Object.keys(solverResult.ingredientQuantities).map((ingId) => {
             const ingredient = ingredients.find((i) => i._id.toString() === ingId);
-            const rounded = roundedQuantities[ingId];
             const priceAtMoment = ingredientsForSolver.find((i) => i.id === ingId)?.price || 0;
             return {
                 name: ingredient?.name || 'Unknown Ingredient',
-                qtyKg: rounded.kg,
-                bags: rounded.bags,
+                qtyKg: Number(looseQuantitiesKg[ingId] || 0),
+                bags: 0,
                 priceAtMoment
             };
         });
@@ -526,7 +919,7 @@ const runFormulationComputation = async (
                 qtyKg: recipeItem.qtyKg,
                 tags: ingredients.find((i) => i.name === recipeItem.name)?.tags
             })),
-            effectiveWeightKg,
+            actualOutputWeightKg > 0 ? actualOutputWeightKg : effectiveWeightKg,
             {
                 feedCategory: standard.feedCategory,
                 poultryType: standard.poultryType
@@ -540,9 +933,13 @@ const runFormulationComputation = async (
             qualityMatch: complianceResult.qualityMatch,
             nutrientStatuses: complianceResult.deviations,
             totalCost: totalCostWithBags,
-            costPerKg: totalCostWithBags / effectiveWeightKg,
+            costPerKg: totalCostWithBags / (actualOutputWeightKg > 0 ? actualOutputWeightKg : effectiveWeightKg),
             actualNutrients: roundedActualNutrients as unknown as Record<string, number>,
+            requestedTargetWeightKg: effectiveWeightKg,
+            actualOutputWeightKg: actualOutputWeightKg > 0 ? actualOutputWeightKg : effectiveWeightKg,
+            evaluationMode: 'optimized',
             recipe: [...recipeSnapshot, ...autoCalcRecipe],
+            appliedAlternatives,
             overheadCost: Number(overheadCost)
         };
     }));
@@ -555,6 +952,144 @@ const runFormulationComputation = async (
         infeasibility,
         standard,
         effectiveWeightKg
+    };
+};
+
+const evaluateExistingMix = async (
+    payload: FormulationRequestBody
+): Promise<{ standard: IFeedStandard; option: FormulationOption }> => {
+    const standard = await resolveStandardForRequest(payload);
+    if (!standard) {
+        throw new FormulationRequestError('Feed standard not found', 404);
+    }
+
+    if (payload.selectedIngredients.length === 0) {
+        throw new FormulationRequestError(
+            'Select at least one ingredient to check an existing mix.'
+        );
+    }
+
+    if (
+        payload.selectedIngredients.some(
+            (item) => item.exactQtyKg === undefined || Number(item.exactQtyKg) <= 0
+        )
+    ) {
+        throw new FormulationRequestError(
+            'Every selected ingredient needs an exact quantity in kg for Check Existing Mix mode.'
+        );
+    }
+
+    const ingredientIds = payload.selectedIngredients.map((item) => item.ingredientId);
+    const ingredients = await Ingredient.find({
+        _id: { $in: ingredientIds },
+        isActive: true
+    });
+
+    if (ingredients.length !== ingredientIds.length) {
+        throw new FormulationRequestError(
+            'One or more selected ingredients are unavailable or inactive.'
+        );
+    }
+
+    const ingredientById = new Map(
+        ingredients.map((ingredient) => [ingredient._id.toString(), ingredient])
+    );
+
+    const quantities: Record<string, number> = {};
+    const recipe: FormulationOption['recipe'] = [];
+    const reportIngredients: Array<{ name: string; qtyKg: number; tags?: string[] }> = [];
+    let totalCost = 0;
+    let actualOutputWeightKg = 0;
+
+    payload.selectedIngredients.forEach((selection) => {
+        const ingredient = ingredientById.get(selection.ingredientId);
+        if (!ingredient) return;
+
+        const qtyKg = Number(selection.exactQtyKg || 0);
+        const priceAtMoment = Number(
+            selection.customPrice !== undefined
+                ? selection.customPrice
+                : ingredient.defaultPrice || 0
+        );
+        quantities[selection.ingredientId] = qtyKg;
+        actualOutputWeightKg += qtyKg;
+        totalCost += qtyKg * priceAtMoment;
+        recipe.push({
+            name: ingredient.name,
+            qtyKg,
+            bags: 0,
+            priceAtMoment,
+            isAutoCalculated: Boolean(ingredient.isAutoCalculated)
+        });
+        reportIngredients.push({
+            name: ingredient.name,
+            qtyKg,
+            tags: ingredient.tags
+        });
+    });
+
+    if (actualOutputWeightKg <= 0) {
+        throw new FormulationRequestError(
+            'The exact mix total must be greater than 0 kg.'
+        );
+    }
+
+    const rawTarget = standard.targetNutrients as unknown as {
+        toObject?: () => Record<string, unknown>;
+        _doc?: Record<string, unknown>;
+    };
+    const targetNutrients = rawTarget.toObject
+        ? rawTarget.toObject()
+        : rawTarget._doc || rawTarget as unknown as Record<string, unknown>;
+
+    const actualNutrients = await solverService.calculateActualNutrients(
+        quantities,
+        ingredients.map((ingredient) => ({
+            id: ingredient._id.toString(),
+            name: ingredient.name,
+            price: Number(ingredient.defaultPrice || 0),
+            nutrients: ingredient.nutrients,
+            constraints: ingredient.constraints,
+            bagWeight: ingredient.bagWeight,
+            tags: ingredient.tags,
+            alternatives: (ingredient.alternatives || []).map((alt) => alt.toString())
+        })),
+        actualOutputWeightKg
+    );
+
+    const complianceResult = complianceService.checkCompliance(
+        actualNutrients,
+        targetNutrients as unknown as Parameters<typeof complianceService.checkCompliance>[1],
+        standard.tolerance,
+        reportIngredients,
+        actualOutputWeightKg,
+        {
+            feedCategory: standard.feedCategory,
+            poultryType: standard.poultryType
+        }
+    );
+
+    return {
+        standard,
+        option: {
+            strategy: 'EXACT_MIX',
+            feasible: true,
+            complianceColor: complianceResult.color,
+            qualityMatch: complianceResult.qualityMatch,
+            nutrientStatuses: complianceResult.deviations,
+            totalCost,
+            costPerKg: totalCost / actualOutputWeightKg,
+            actualNutrients: actualNutrients as unknown as Record<string, number>,
+            requestedTargetWeightKg:
+                payload.targetWeightKg > 0
+                    ? Number(payload.targetWeightKg)
+                    : actualOutputWeightKg,
+            actualOutputWeightKg,
+            evaluationMode: 'exact',
+            recipe,
+            appliedAlternatives: [],
+            overheadCost: Number(payload.overheadCost || 0)
+        }
     };
 };
 
@@ -577,6 +1112,15 @@ export const calculateFormulation = async (req: Request, res: Response) => {
         const computation = await runFormulationComputation(payload);
         if (computation.feasibleOptions.length === 0) {
             return res.json(toStructuredInfeasibleResponse(computation.standard, computation.infeasibility));
+        }
+
+        if (computation.feasibleOptions.every((option) => option.complianceColor === 'Red')) {
+            return res.json(
+                toStructuredNonCompliantResponse(
+                    computation.standard,
+                    computation.feasibleOptions
+                )
+            );
         }
 
         const allRecipeNames = Array.from(new Set(
@@ -620,7 +1164,8 @@ export const calculateFormulation = async (req: Request, res: Response) => {
                     complianceColor: option.complianceColor,
                     qualityMatchPercentage: option.qualityMatch,
                     actualNutrients: option.actualNutrients,
-                    ingredientsUsed
+                    ingredientsUsed,
+                    appliedAlternatives: option.appliedAlternatives
                 };
             })
             .filter((option): option is {
@@ -639,6 +1184,7 @@ export const calculateFormulation = async (req: Request, res: Response) => {
                     ingredientId: typeof snapshotIngredients[number]['_id'];
                     nutrientsAtMoment: typeof snapshotIngredients[number]['nutrients'];
                 }>;
+                appliedAlternatives: AppliedAlternativeSelection[];
             } => option !== null);
 
         if (strategyOptions.length === 0) {
@@ -662,6 +1208,7 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             complianceColor: referenceOption.complianceColor,
             qualityMatchPercentage: referenceOption.qualityMatchPercentage,
             actualNutrients: referenceOption.actualNutrients,
+            appliedAlternatives: referenceOption.appliedAlternatives,
             isDemo: false,
             ingredientsUsed: referenceOption.ingredientsUsed,
             strategyOptions,
@@ -689,9 +1236,54 @@ export const calculateFormulation = async (req: Request, res: Response) => {
             message: 'Multi-strategy formulations calculated. Compare and unlock your preferred mix.'
         });
     } catch (error) {
+        if (error instanceof FormulationRequestError) {
+            return res.status(error.statusCode).json({
+                error: error.message,
+                message: error.message
+            });
+        }
         console.error('Error calculating formulation:', error);
         return res.status(500).json({
             error: 'Failed to calculate formulation',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+};
+
+export const checkExistingMix = async (req: Request, res: Response) => {
+    try {
+        const payload = coerceFormulationRequest(req.body);
+
+        if (!hasStandardSelector(payload) || payload.selectedIngredients.length === 0) {
+            return res.status(400).json({
+                error: 'Missing required fields',
+                required: ['standardId or stageCode', 'selectedIngredients']
+            });
+        }
+
+        const evaluation = await evaluateExistingMix(payload);
+
+        return res.json({
+            status: 'evaluated',
+            feedType: getFeedType(evaluation.standard.feedCategory),
+            fishSubtype: getFishSubtype(evaluation.standard),
+            poultryType: evaluation.standard.poultryType?.toLowerCase(),
+            options: [evaluation.option],
+            isDemo: false,
+            effectiveWeightKg: evaluation.option.actualOutputWeightKg,
+            requestedTargetWeightKg: evaluation.option.requestedTargetWeightKg,
+            message: 'Existing mix evaluated against the selected standard.'
+        });
+    } catch (error) {
+        if (error instanceof FormulationRequestError) {
+            return res.status(error.statusCode).json({
+                error: error.message,
+                message: error.message
+            });
+        }
+        console.error('Error evaluating existing mix:', error);
+        return res.status(500).json({
+            error: 'Failed to evaluate existing mix',
             details: error instanceof Error ? error.message : 'Unknown error'
         });
     }
@@ -730,6 +1322,14 @@ export const previewFormulationFix = async (req: Request, res: Response) => {
             });
         }
 
+        if (preview.feasibleOptions.every((option) => option.complianceColor === 'Red')) {
+            return res.json({
+                ...toStructuredNonCompliantResponse(preview.standard, preview.feasibleOptions),
+                status: 'preview_non_compliant',
+                baselineFeasible: baseline.feasibleOptions.length > 0
+            });
+        }
+
         const bestPreview = preview.feasibleOptions
             .slice()
             .sort((a, b) => a.totalCost - b.totalCost)[0];
@@ -754,6 +1354,12 @@ export const previewFormulationFix = async (req: Request, res: Response) => {
             }
         });
     } catch (error) {
+        if (error instanceof FormulationRequestError) {
+            return res.status(error.statusCode).json({
+                error: error.message,
+                message: error.message
+            });
+        }
         console.error('Error previewing formulation fix:', error);
         return res.status(500).json({
             error: 'Failed to preview formulation fix',
@@ -794,14 +1400,63 @@ export const evaluateAlternativeOptions = async (req: Request, res: Response) =>
         });
         const cached = await alternativeCacheService.get<{
             suggestions: unknown[];
+            groups?: AlternativeSuggestionGroup[];
             feedType: string;
             generatedAt: string;
         }>(cacheKey);
         if (cached) {
+            const cachedGroups = Array.isArray(cached.groups)
+                ? cached.groups
+                : buildAlternativeSuggestionGroups(
+                    ingredientIds,
+                    (Array.isArray(cached.suggestions) ? cached.suggestions : [])
+                        .filter(
+                            (item): item is {
+                                ruleId: string;
+                                originalIngredient: {
+                                    id?: string;
+                                    name: string;
+                                    price: number;
+                                    category?: string;
+                                };
+                                alternativeIngredient: {
+                                    id?: string;
+                                    name: string;
+                                    price: number;
+                                    category?: string;
+                                };
+                                estimatedCostDeltaPerKg: number;
+                                maxBlendPercent: number;
+                                notes?: string;
+                            } =>
+                                typeof item === 'object' &&
+                                item !== null &&
+                                'originalIngredient' in item &&
+                                'alternativeIngredient' in item,
+                        )
+                        .map((item, index) => ({
+                            _id: item.ruleId || `cached-${index}`,
+                            originalIngredientId: {
+                                _id: item.originalIngredient.id,
+                                name: item.originalIngredient.name,
+                                defaultPrice: item.originalIngredient.price,
+                                category: item.originalIngredient.category,
+                            },
+                            alternativeIngredientId: {
+                                _id: item.alternativeIngredient.id,
+                                name: item.alternativeIngredient.name,
+                                defaultPrice: item.alternativeIngredient.price,
+                                category: item.alternativeIngredient.category,
+                            },
+                            maxBlendPercent: item.maxBlendPercent,
+                            notes: item.notes,
+                        })),
+                );
             return res.json({
                 status: 'cached',
                 cacheKey,
-                ...cached
+                ...cached,
+                groups: cachedGroups,
             });
         }
 
@@ -850,8 +1505,27 @@ export const evaluateAlternativeOptions = async (req: Request, res: Response) =>
             };
         });
 
+        const groups = buildAlternativeSuggestionGroups(ingredientIds, rules as unknown as Array<{
+            _id: unknown;
+            originalIngredientId: {
+                _id?: unknown;
+                name: string;
+                defaultPrice?: number;
+                category?: string;
+            };
+            alternativeIngredientId: {
+                _id?: unknown;
+                name: string;
+                defaultPrice?: number;
+                category?: string;
+            };
+            maxBlendPercent?: number;
+            notes?: string;
+        }>);
+
         const responsePayload = {
             suggestions,
+            groups,
             feedType,
             generatedAt: new Date().toISOString()
         };
@@ -1211,6 +1885,7 @@ type StrategySnapshot = {
     qualityMatchPercentage: number;
     actualNutrients: Record<string, number>;
     ingredientsUsed: unknown[];
+    appliedAlternatives: AppliedAlternativeSelection[];
 };
 
 const normalizeStrategy = (value?: string): string | undefined => {
@@ -1232,7 +1907,10 @@ const getStrategySnapshots = (formulation: any): StrategySnapshot[] => {
             complianceColor: snapshot.complianceColor || 'Blue',
             qualityMatchPercentage: Number(snapshot.qualityMatchPercentage || 0),
             actualNutrients: snapshot.actualNutrients || {},
-            ingredientsUsed: snapshot.ingredientsUsed || []
+            ingredientsUsed: snapshot.ingredientsUsed || [],
+            appliedAlternatives: Array.isArray(snapshot.appliedAlternatives)
+                ? snapshot.appliedAlternatives
+                : []
         }));
     }
 
@@ -1244,7 +1922,10 @@ const getStrategySnapshots = (formulation: any): StrategySnapshot[] => {
         complianceColor: formulation.complianceColor || 'Blue',
         qualityMatchPercentage: Number(formulation.qualityMatchPercentage || 0),
         actualNutrients: formulation.actualNutrients || {},
-        ingredientsUsed: formulation.ingredientsUsed || []
+        ingredientsUsed: formulation.ingredientsUsed || [],
+        appliedAlternatives: Array.isArray(formulation.appliedAlternatives)
+            ? formulation.appliedAlternatives
+            : []
     }];
 };
 
@@ -1273,6 +1954,7 @@ const toUnlockResponsePayload = (
     isUnlocked: true,
     ingredientsUsed: snapshot.ingredientsUsed,
     recipe: snapshot.ingredientsUsed,
+    appliedAlternatives: snapshot.appliedAlternatives,
     totalCost: snapshot.totalCost,
     costPerKg: snapshot.costPerKg,
     complianceColor: snapshot.complianceColor,
@@ -1381,6 +2063,7 @@ export const unlockFormulation = async (req: Request, res: Response) => {
                 formulation.qualityMatchPercentage = selectedSnapshot.qualityMatchPercentage;
                 formulation.actualNutrients = selectedSnapshot.actualNutrients as any;
                 formulation.ingredientsUsed = selectedSnapshot.ingredientsUsed as any;
+                formulation.appliedAlternatives = selectedSnapshot.appliedAlternatives as any;
                 formulation.selectedStrategy = selectedSnapshot.strategy;
                 formulation.isUnlocked = true;
                 formulation.unlockedAt = new Date();
